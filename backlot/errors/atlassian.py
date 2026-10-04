@@ -260,6 +260,54 @@ def start_too_large() -> AtlassianError:
     )
 
 
+def search_cursor_refused(*, empty: bool = False) -> AtlassianError:
+    """The CQL search's refusal of a `cursor` it cannot page by
+    (``backlot.routers.atlassian._cql_sort_value`` says which): a 400, or with ``empty`` a 500.
+    Both bodies name the search service behind the route, which is where the token is read."""
+    status = 500 if empty else 400
+    failure = (
+        "There was an error returned from XP-Search Aggregator API: HTTP/1.1 500 Internal Server "
+        "Error"
+        if empty
+        else "There was an illegal request passed to XP-Search Aggregator API : HTTP/1.1 400 Bad "
+        "Request"
+    )
+    scale = "com.atlassian.confluence.api.service.exceptions.scale.SSStatusCodeException"
+    return AtlassianError(
+        status,
+        {
+            "statusCode": status,
+            "message": (
+                f"{scale}: CQL was parsed but the search manager was unable to execute the search. "
+                f"Error message: {scale}: {failure}"
+            ),
+        },
+    )
+
+
+def search_next_out_of_range() -> AtlassianError:
+    """The CQL search's refusal of a page whose `next` would carry a `start` past Java's `int`.
+
+    Measured 2026-10-04 on nine matches: where `next` is answered, a `start` plus the rows served,
+    or plus one on a page that served none, above 2147483647 is this 400 —
+    `?limit=2&start=2147483646` and `?limit=0&start=2147483647` are, `?limit=1&start=2147483646`
+    and `?limit=0&start=2147483646` are served, and so is `?start=2147483647`, which serves all
+    nine and answers no `next`. The body carries the `data` member :func:`start_too_large`'s does.
+    """
+    return AtlassianError(
+        400,
+        {
+            "statusCode": 400,
+            "data": {"authorized": True, "valid": True, "errors": [], "successful": True},
+            "message": (
+                "com.atlassian.confluence.api.service.exceptions.api.BadRequestException: CQL was "
+                "parsed but the search manager was unable to execute the search. Error message: "
+                "java.lang.IllegalArgumentException"
+            ),
+        },
+    )
+
+
 def negative_not_allowed(name: str) -> AtlassianError:
     """Confluence's refusal of a negative ``limit`` or ``start``, measured 2026-09-14 on `content`
     and `space` and 2026-09-23 on the three listings under `content/{id}`. Jira does NOT share

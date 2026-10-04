@@ -1551,36 +1551,169 @@ def _named_row(token: str) -> str:
     return json.loads(base64.b64decode(payload))[0].strip()
 
 
-def test_confluence_cql_cursor_names_the_last_row_the_page_served(searchable):
-    """Measured 2026-09-23: the token names the last row served, so the second match at `limit=2`,
-    and on an empty page the first match whatever `start` says."""
+def _token(row_id: str, *, real: bool = False, tab: bool = True) -> str:
+    """A cursor naming ``row_id``, as this server spells one, or as real does, whose sort value goes
+    on past the id; with ``tab=False``, the id alone, which names no row."""
+    value = ("\t" if tab else "") + row_id + (" mG3e:Saf>3LVt*JA@Ok1 cp" if real else "")
+    payload = base64.b64encode(json.dumps([value]).encode()).decode()
+    return quote(f"_t_{payload}_h_W10=", safe="")
+
+
+_SCALE = "com.atlassian.confluence.api.service.exceptions.scale.SSStatusCodeException"
+_REFUSED, _FAILED = (
+    f"{_SCALE}: CQL was parsed but the search manager was unable to execute the search. Error "
+    f"message: {_SCALE}: {failure}"
+    for failure in (
+        "There was an illegal request passed to XP-Search Aggregator API : HTTP/1.1 400 Bad Request",
+        "There was an error returned from XP-Search Aggregator API: HTTP/1.1 500 Internal Server "
+        "Error",
+    )
+)
+
+_NEXT_PAST_INT = errors_atlassian.search_next_out_of_range().body
+
+# The CQL search's page over `searchable`'s four matches, by the rules `_cql_position`,
+# `_cql_cursor` and `_cql_sort_value` record: the query after `_CQL`, where `{cN}` is a cursor this
+# server spells naming match N, `{real1}` real's spelling of the one naming match 1 and `{bare1}`
+# match 1's id with no tab in front; then the matches served, or `(status, message)` for a refusal
+# (the whole body where it carries more, `None` for none); then the match `next`'s cursor names, or
+# `None` for no `next`.
+# fmt: off
+_CQL_PAGE_ROWS = [
+    ("&limit=2", [0, 1], 1),
+    ("&limit=0&start=3", [], 0),
+    ("&limit=1&start=3", [0], 0),
+    ("&limit=2&start=100001", [0, 1], 1),
+    ("&limit=2&cursor={c1}", [2, 3], None),
+    ("&limit=2&start=100001&cursor={c1}", [2, 3], None),
+    ("&limit=2&cursor={real1}", [2, 3], None),
+    ("&limit=2&cursor={bare1}", [0, 1], 1),
+    ("&limit=1&cursor={c0}", [1], 1),
+    ("&limit=0&cursor={c1}", [], 2),
+    ("&limit=0&cursor={c2}", [], None),
+    ("&limit=2&cursor={c3}", [], None),
+    ("&limit=2&cursor=", [0, 1], 1),
+    ("&limit=2&cursor", [0, 1], 1),
+    ("&limit=2&cursor=&cursor={c1}", [0, 1], 1),
+    ("&limit=2&cursor={c1}&cursor=", [2, 3], None),
+    ("&limit=1&cursor={c1}&cursor={c2}", [2], 2),
+    ("&limit=2&cursor=abc", (400, _REFUSED), None),
+    ("&limit=2&cursor=_t_WyJcdDEiXQ%3D%3D", (400, _REFUSED), None),
+    ("&limit=2&cursor=WyJcdDEiXQ%3D%3D_h_W10%3D", (400, _REFUSED), None),
+    ("&limit=2&cursor=_t_WyJcdDEiXQ%3D%3D_h_abc", (400, _REFUSED), None),
+    ("&limit=2&cursor=_t_%21%21%21_h_W10%3D", (400, _REFUSED), None),
+    ("&limit=2&cursor=_t_aGVsbG8%3D_h_W10%3D", (400, _REFUSED), None),
+    ("&limit=2&cursor=_t_WyJcdDEiLCAiXHQyIl0%3D_h_W10%3D", (400, _REFUSED), None),
+    ("&limit=2&cursor=_t_W10%3D_h_W10%3D", (500, _FAILED), None),
+    ("&limit=3&cursor=_t_W3t9XQ%3D%3D_h_W10%3D", (500, _FAILED), None),
+    ("&limit=3&cursor=_t_W1siXHQxIl1d_h_W10%3D", (500, _FAILED), None),
+    ("&limit=3&cursor=_t_WzNd_h_W10%3D", [0, 1, 2], 2),
+    ("&limit=3&cursor=_t_W3RydWVd_h_W10%3D", [0, 1, 2], 2),
+    ("&limit=3&cursor=_t_W251bGxd_h_W10%3D", [], None),
+    ("&limit=2&cursor=_t_WyJcdH5-fiJd_h_W10%3D", [0, 1], 1),
+    ("&limit=1&start=2147483646", [0], 0),
+    ("&limit=2&start=2147483646", (400, _NEXT_PAST_INT), None),
+    ("&limit=0&start=2147483646", [], 0),
+    ("&limit=0&start=2147483647", (400, _NEXT_PAST_INT), None),
+    ("&limit=4&start=2147483647", [0, 1, 2, 3], None),
+    ("&limit=1&start=2147483647&cursor={c2}", [3], None),
+    ("&limit=1&start=2147483647&cursor={c1}", (400, _NEXT_PAST_INT), None),
+    ("&limit=-1&cursor=abc", (400, 'java.lang.IllegalArgumentException: limit cannot be less than zero'), None),
+    ("&limit=abc&cursor=abc", (404, None), None),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize("query, answer, next_names", _CQL_PAGE_ROWS)
+def test_confluence_cql_pages_by_the_cursor_it_is_sent(searchable, query, answer, next_names):
     client, h = searchable
-    page = client.get(f"{_CQL}&limit=2", headers=h).json()
-    assert page["totalSize"] == 4
-    served = [r["content"]["id"] for r in page["results"]]
-    assert _named_row(_cursors(page["_links"]["next"])[0]) == served[-1] != served[0]
-    first = client.get(f"{_CQL}&limit=1", headers=h).json()["results"][0]["content"]["id"]
-    empty = client.get(f"{_CQL}&limit=0&start=3", headers=h).json()
-    assert _named_row(_cursors(empty["_links"]["next"])[0]) == first
+    matches = client.get(f"{_CQL}&limit=4", headers=h).json()["results"]
+    ids = [r["content"]["id"] for r in matches]
+    tokens = {f"c{n}": _token(row) for n, row in enumerate(ids)} | {
+        "real1": _token(ids[1], real=True),
+        "bare1": _token(ids[1], tab=False),
+    }
+    r = client.get(_CQL + query.format(**tokens), headers=h)
+    if isinstance(answer, tuple):
+        status, message = answer
+        assert r.status_code == status, r.text
+        if message is None:
+            assert (r.content, r.headers.get("content-type")) == (b"", None)
+        elif isinstance(message, dict):
+            assert r.json() == message
+        else:
+            assert r.json() == {"statusCode": status, "message": message}
+        return
+    page = r.json()
+    assert [row["content"]["id"] for row in page["results"]] == [ids[n] for n in answer]
+    sent = re.search(r"start=(\d+)", query)
+    assert (page["totalSize"], page["start"]) == (4, int(sent[1]) if sent else 0)
+    nxt = page["_links"].get("next")
+    assert (ids.index(_named_row(_cursors(nxt)[0])) if nxt else None) == next_names
+    # whatever the request sent as `cursor`, `self` carries none and `next` its own alone
+    assert "cursor=" not in page["_links"]["self"] and len(_cursors(nxt or "")) == bool(nxt)
+
+
+def test_confluence_cql_cursor_finds_out_no_page_the_caller_cannot_see(tmp_path):
+    """A cursor is positioned among the caller's own matches, so one naming a page a scoped token
+    cannot see answers as no cursor does, where the admin is served the rows after it. The pages
+    say the term three times, twice and once, so the hidden one ranks between the two seen."""
+    page = {"source_type": "confluence", "space": "handbook", "author_email": "ava@acme.com"}
+    seen_pages = {"author_groups": ["engineering"], "visibility": "public"}
+    records = [
+        {**page, **seen_pages, "doc_id": "cf-rollout-3", "title": "Rollout three",
+         "content": "rollout rollout rollout steps"},
+        {**page, **seen_pages, "doc_id": "cf-rollout-1", "title": "Rollout one",
+         "content": "rollout steps"},
+        {**page, "doc_id": "cf-rollout-pay", "space": "people-ops", "title": "Rollout pay",
+         "content": "rollout rollout steps", "author_email": "hana@acme.com",
+         "author_groups": ["people"], "visibility": "group"},
+    ]  # fmt: skip
+    settings = tiny_corpus(tmp_path, records)
+    users = yaml.safe_load(settings.tokens_path.read_text())
+    with client_for(settings, reload=True) as client:
+        admin_h = {"Authorization": f"Bearer {users['admin_token']}"}
+        ava = next(u["token"] for u in users["users"] if u["email"] == "ava@acme.com")
+        ava_h = {"Authorization": f"Bearer {ava}"}
+        q = '/atlassian/wiki/rest/api/search?cql=text~"rollout"&limit=50'
+
+        def served(headers: dict, cursor: str = "") -> list:
+            sent = f"&cursor={_token(cursor)}" if cursor else ""
+            return [
+                r["content"]["id"] for r in client.get(q + sent, headers=headers).json()["results"]
+            ]
+
+        every, seen = served(admin_h), served(ava_h)
+        hidden = next(row for row in every if row not in seen)
+        assert len(seen) == 2 and every.index(hidden) == 1
+        assert served(ava_h, hidden) == seen
+        assert served(admin_h, hidden) == every[2:]
 
 
 def test_confluence_cql_links_carry_one_cursor_and_prev_the_one_sent(searchable):
     """Measured 2026-09-23 following `next` three hops at `limit=0`, `1` and `2`: `next` carries
     the new cursor alone, `self` none, and `prev` leads with the one the request sent, at `start=0`
-    too. With a cursor sent, `prev`'s own `limit` is the request's rather than the rows skipped."""
+    too. With a cursor sent, `prev`'s own `limit` is the request's rather than the rows skipped.
+    At `limit=1` each hop moves the cursor one match on, and at `limit=0` too, where no page serves
+    a row."""
     client, h = searchable
+    ids = [r["content"]["id"] for r in client.get(f"{_CQL}&limit=4", headers=h).json()["results"]]
     for limit in (0, 1):
         page = client.get(f"{_CQL}&limit={limit}", headers=h).json()
         nxt = page["_links"]["next"]
         assert re.match(rf"/rest/api/search\?next=true&cursor=[^&]+&limit={limit}&start=", nxt)
         assert "cursor=" not in page["_links"]["self"]
+        named, served = [], []
         for _hop in range(3):
             sent = _cursors(page["_links"]["next"])
             assert len(sent) == 1, page["_links"]["next"]
+            named.append(_named_row(sent[0]))
             page = client.get("/atlassian/wiki" + page["_links"]["next"], headers=h).json()
+            served += [r["content"]["id"] for r in page["results"]]
             links = page["_links"]
             assert "cursor=" not in links["self"]
             assert links["prev"].startswith(f"/rest/api/search?cursor={sent[0]}&prev=true&")
+        assert (named, served) == (ids[:3], ids[1:4] if limit else [])
     token = _cursors(client.get(f"{_CQL}&limit=1", headers=h).json()["_links"]["next"])[0]
     with_cursor = client.get(f"{_CQL}&cursor={token}&limit=3&start=1", headers=h).json()
     assert with_cursor["_links"]["prev"].startswith(

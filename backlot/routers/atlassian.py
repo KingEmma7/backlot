@@ -12,6 +12,7 @@ answer carries (:func:`vendor_headers`, put on by ``backlot.main.report_atlassia
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import re
 import time
@@ -1344,6 +1345,9 @@ async def confluence_cql_search(request: Request):
     if limit is None or start is None:
         return Response(status_code=404)
     _refuse_negative_page_params(limit, start)
+    # An empty `cursor` is none, and of a repeated one the first is read, measured 2026-10-04.
+    sent_cursor = (request.query_params.getlist("cursor") or [None])[0]
+    sort_value = _cql_sort_value(sent_cursor) if sent_cursor else None
 
     # fetch the full ACL-visible match set, filter by the clauses, then paginate — so
     # totalSize reflects the true match count (not just the returned page).
@@ -1362,7 +1366,11 @@ async def confluence_cql_search(request: Request):
 
     matched = [r for r in everything if _match(r)]
     total = len(matched)
-    rows = matched[start : start + limit]
+    position = _cql_position(matched, sort_value) if sent_cursor else 0
+    rows = matched[position : position + limit]
+    reached = position + max(len(rows), 1)
+    if reached < total and start + max(len(rows), 1) > 2**31 - 1:
+        raise errors_atlassian.search_next_out_of_range()
     results = []
     for r in rows:
         page = _confluence_page(conn, request, r, "version,space")
@@ -1385,8 +1393,9 @@ async def confluence_cql_search(request: Request):
         limit=limit,
         size=len(results),
         total=total,
-        cursor=_cql_cursor(rows, matched),
-        sent_cursor=request.query_params.get("cursor"),
+        cursor=_cql_cursor(rows, matched, position),
+        sent_cursor=sent_cursor,
+        reached=reached,
     )
     return {
         "results": results,
@@ -1980,29 +1989,77 @@ def _cql_page_param(request: Request, name: str, default: int) -> int | None:
     return value if -(2**31) <= value < 2**31 else None
 
 
+def _cql_sort_value(token: str):
+    """The sort value a sent `cursor` carries, a JSON scalar, or real's refusal of a token it cannot
+    page by (:func:`backlot.errors.atlassian.search_cursor_refused`).
+
+    Measured 2026-10-04: a token is `_t_` and `_h_` around two base64 JSON lists, the first holding
+    the one sort value the page goes on after and the second `[]` on every token real issued; the
+    URL-safe alphabet reads as the standard one. The 400 answers `abc`, a token without `_t_` or
+    without `_h_`, a part that is not base64 or not JSON, a second part of `abc`, and two sort
+    values; the 500 answers an empty first list, or a list or an object as the value. A string, a
+    number, `true`, `false` and `null` are served (:func:`_cql_position`). A part that is JSON but
+    not a list is refused here unmeasured. Both refusals come after the route's of `limit` and
+    `start`: `?limit=abc&cursor=abc` is the 404 and `?limit=-1&cursor=abc` the negative 400.
+    """
+    parts = re.fullmatch(r"_t_(.*)_h_(.*)", token, re.S)
+    lists = []
+    for part in parts.groups() if parts else ():
+        standard = part.replace("-", "+").replace("_", "/") + "=" * (-len(part) % 4)
+        try:
+            lists.append(json.loads(base64.b64decode(standard, validate=True)))
+        except (ValueError, binascii.Error):
+            lists.append(None)
+    if len(lists) != 2 or not all(isinstance(each, list) for each in lists) or len(lists[0]) > 1:
+        raise errors_atlassian.search_cursor_refused()
+    if not lists[0] or isinstance(lists[0][0], (list, dict)):
+        raise errors_atlassian.search_cursor_refused(empty=True)
+    return lists[0][0]
+
+
+def _cql_position(matched: list, sort_value) -> int:
+    """Where in ``matched`` the CQL search's page starts, given the value a sent cursor carries
+    (:func:`_cql_sort_value`): after the row whose id follows the tab a string value opens with,
+    after every row for `null`, and at the first match for any other value.
+
+    Measured 2026-10-04 on a nine-page site: `start` is echoed and advanced in the links but never
+    positions the page, so `?limit=1&start=100001` serves the first match, and a cursor naming the
+    second match serves the third onwards at any `start`. Real's own value is `"\\t<id> …"`, and
+    it serves the rows whose value sorts after the one sent, in the descending order of those values
+    it answers in: a number, `true` or `false` start at the first match and `null` after the last.
+    This server's matches are in an order of its own, so it positions after the row whose id a
+    string names, and starts at the first match for one naming none of them, where real may answer
+    an empty page or one from the middle (`"\\t3"` started at the sixth of nine).
+    """
+    if sort_value is None:
+        return len(matched)
+    named = re.match(r"\t(\S+)", sort_value) if isinstance(sort_value, str) else None
+    for i, row in enumerate(matched if named else ()):
+        if str(row["id"]) == named.group(1):
+            return i + 1
+    return 0
+
+
 # The `start` past which `content` answers `start_too_large`. The same `start` is a 200 on the
-# neighbours: an empty page on `space` and on `child/page`, and on the CQL search a page holding a
-# row, where this server answers the empty slice (:func:`_cql_cursor` says why).
+# neighbours: an empty page on `space` and on `child/page`, and on the CQL search the page `start`
+# does not position (:func:`_cql_position`).
 _CONTENT_START_BOUND = 100_000
 
 
-def _cql_cursor(served: list, matched: list) -> str | None:
+def _cql_cursor(served: list, matched: list, position: int) -> str | None:
     """The `cursor` real's CQL search carries on `next`: a token naming the last row the page
-    served, or the first match when it served none.
+    served, or on a page that served none the row it would have started with
+    (:func:`_cql_position`).
 
     Measured 2026-09-23 on a nine-page site: the token names the second match at `limit=2` and the
-    fifth at `limit=5`, moves with each `next` followed, and on an empty page sent no cursor names
-    the first match whatever `start` says. Real's token is opaque and carries that row's id inside
-    a base64 payload; this builds one of its own from the same thing, so a client sees a token
-    shaped like real's.
-
-    The route does not read a cursor sent back. Real positions the page by it and not by `start`,
-    which it echoes and advances without reading: `?limit=1&start=5` with no cursor serves the first
-    match, and following `next` from `?limit=0` moves the token one row per hop. This server
-    positions by `start`, which following its own `next` keeps in step with the cursor whenever
-    `limit` is above zero; those two cases are where it answers otherwise.
+    fifth at `limit=5`, and moves with each `next` followed. Measured 2026-10-04, an empty page
+    names the first match when no cursor was sent, whatever `start` says, and the row after the sent
+    one's when one was: `?limit=0` with a cursor naming the second match names the third, where
+    `next` is answered only while a match follows that one. Real's token carries the row's sort
+    value (:func:`_cql_sort_value`); this builds one of its own from the row's id, so a client sees
+    a token shaped like real's, and real reads this one back as it reads its own.
     """
-    row = served[-1] if served else (matched[0] if matched else None)
+    row = served[-1] if served else (matched[position] if position < len(matched) else None)
     if row is None:
         return None
     payload = base64.b64encode(f'["\\t{row["id"]}"]'.encode()).decode("ascii")
@@ -2041,6 +2098,7 @@ def _confluence_envelope(
     total: int,
     cursor: str | None = None,
     sent_cursor: str | None = None,
+    reached: int | None = None,
 ) -> dict:
     """`_links` as every paged Confluence listing answers it: `base`, `context` and `self` on every
     page, plus `next`/`prev` from :func:`backlot.pagination.confluence_page_links`.
@@ -2050,10 +2108,11 @@ def _confluence_envelope(
     `self` is the request's URL with `limit`, `start` and the two markers removed and every other
     parameter kept — a cache-buster sent with the request comes back inside `self`.
 
-    ``cursor`` and ``sent_cursor`` are the CQL search's: the token this page's `next` carries and
-    the one the request brought. Measured 2026-09-23 following `next` three hops at `limit=0`, `1`
-    and `2`: the sent one is not carried the way other parameters are, so `self` holds no cursor
-    and `next` the new one alone, and `prev` is where it goes back out.
+    ``cursor``, ``sent_cursor`` and ``reached`` are the CQL search's: the token this page's `next`
+    carries, the one the request brought, and where among the matches the page ends, as
+    :func:`backlot.pagination.confluence_page_links` counts it. Measured 2026-09-23 following `next`
+    three hops at `limit=0`, `1` and `2`: the sent one is not carried the way other parameters are,
+    so `self` holds no cursor and `next` the new one alone, and `prev` is where it goes back out.
     """
     lead, trail = _confluence_carried(request, own=() if sent_cursor is None else ("cursor",))
     query = "&".join(p for p in (lead.rstrip("&"), trail) if p)
@@ -2063,7 +2122,9 @@ def _confluence_envelope(
         "self": f"{_site(request)}/wiki{route}" + (f"?{query}" if query else ""),
     }
     sent = quote(sent_cursor, safe="") if sent_cursor else None
-    links.update(confluence_page_links(route, start, limit, size, total, lead, trail, cursor, sent))
+    links.update(
+        confluence_page_links(route, start, limit, size, total, lead, trail, cursor, sent, reached)
+    )
     return links
 
 
