@@ -257,8 +257,10 @@ def invalid_json(message: str) -> GoogleError:
 
 
 def internal_error() -> GoogleError:
-    """Real's 500, which `values:batchGetByDataFilter` answers to a `majorDimension` number the
-    enum does not declare, measured 2026-10-04."""
+    """Real's 500 on the Sheets data-filter reads, measured 2026-10-04: an enum number the proto
+    does not declare in some fields, and a `ROW`, `COLUMN` or `SHEET` lookup beside a `spreadsheet`
+    location. ``routers.google._sheets_check_lookup`` and ``sheets_values_batch_get_by_data_filter``
+    list which."""
     return GoogleError(500, "Internal error encountered.", reason="backendError", status="INTERNAL")
 
 

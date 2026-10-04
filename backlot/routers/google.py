@@ -3378,10 +3378,11 @@ async def sheets_values_get(spreadsheet_id: str, a1_range: str, request: Request
 
 # --- the two reads issued over POST ------------------------------------------------------------
 #
-# A DataFilter selects the same cells an A1 range does, by range or by grid indices. Measured, the
-# two endpoints disagree about an ABSENT filter list: `values:batchGetByDataFilter` refuses it
-# ("Must specify at least one dataFilter.") while `spreadsheets:getByDataFilter` treats it as
-# "every sheet".
+# A DataFilter selects the same cells an A1 range does, by range or by grid indices, or selects them
+# by developer metadata (`developerMetadataLookup`), which a corpus never carries, so a lookup
+# selects nothing (`_sheets_check_lookup`). Measured, the two endpoints disagree about an ABSENT
+# filter list: `values:batchGetByDataFilter` refuses it ("Must specify at least one dataFilter.")
+# while `spreadsheets:getByDataFilter` treats it as "every sheet".
 #
 # The request messages as `backlot.protojson` reads them: the Sheets v4 discovery document's fields,
 # in proto field order (the order real echoes a filter back in) rather than the order the document
@@ -3594,11 +3595,112 @@ def _sheets_grid_selection(grid: dict, sheets: list[_Sheet], sheet_word: str):
     return _a1_name(sheet, r0, c0, min(r1, sheet.rows), min(c1, sheet.cols))
 
 
+def _sheets_check_lookup(lookup: dict, sheets: list[_Sheet]) -> None:
+    """A `developerMetadataLookup`'s refusals. A corpus states no developer metadata, so a lookup
+    that passes them matches nothing — real's answer for one on a spreadsheet carrying none,
+    measured 2026-10-04 — and the caller serves it as such.
+
+    Real's checks, in the order it makes them, measured the same day over every combination of
+    six `locationType`s, eight locations and four `locationMatchingStrategy`s (a location with no
+    member, `{}`, counts as none)::
+
+        locationType SPREADSHEET, a location other than spreadsheet: true
+                                            Cannot limit by location type of SPREADSHEET for the
+                                            location <the location's member>
+        EXACT_LOCATION beside a locationType     The locationMatchingStrategy was specified as …
+        a strategy and no location               A locationMatchingStrategy was specified, but …
+        INTERSECTING_LOCATION, spreadsheet: true DeveloperMetadataLookup.spreadsheet is true, …
+        a locationType number not in the enum    500
+        the location (:func:`_sheets_check_dimension_range`, or a sheetId no sheet has)
+        ROW, COLUMN or SHEET with a spreadsheet location, a strategy or a visibility number not
+        in the enum                              500
+
+    The location's own `locationType` is read and ignored."""
+    location_type = lookup.get("location_type", 0)
+    strategy = lookup.get("location_matching_strategy", 0)
+    location = lookup.get("metadata_location") or {}
+    member = next(
+        (field for field in _PJ_METADATA_LOCATION.fields if field.name in location and field.oneof),
+        None,
+    )
+    whole_spreadsheet = (
+        member is not None and member.name == "spreadsheet" and location["spreadsheet"]
+    )
+    if location_type == 4 and member is not None and not whole_spreadsheet:
+        raise gerr.invalid_argument(
+            f"Cannot limit by location type of SPREADSHEET for the location {member.json_name}"
+        )
+    if strategy == 1 and location_type != 0:
+        raise gerr.invalid_argument(
+            "The locationMatchingStrategy was specified as EXACT_LOCATION, but a locationType was "
+            "also specified: lookups cannot limit by a location type when matching an exact "
+            "location."
+        )
+    if strategy != 0 and member is None:
+        raise gerr.invalid_argument(
+            "A locationMatchingStrategy was specified, but no metadataLocation was specified: "
+            "lookups must always specify a metadataLocation when specifying a "
+            "locationMatchingStrategy."
+        )
+    if strategy == 2 and whole_spreadsheet:
+        raise gerr.invalid_argument(
+            "DeveloperMetadataLookup.spreadsheet is true, but locationMatchingStrategy was "
+            "specified as INTERSECTING."
+        )
+    if not 0 <= location_type < len(_PJ_LOCATION_TYPE.names):
+        raise gerr.internal_error()
+    if member is not None and member.name == "sheet_id":
+        if all(s.sheet_id != location["sheet_id"] for s in sheets):
+            raise gerr.invalid_argument(f"No grid with id: {location['sheet_id']}")
+    if member is not None and member.name == "dimension_range":
+        _sheets_check_dimension_range(location["dimension_range"], sheets)
+    if location_type in (1, 2, 3) and member is not None and member.name == "spreadsheet":
+        raise gerr.internal_error()
+    if not 0 <= strategy < len(_PJ_MATCHING.names):
+        raise gerr.internal_error()
+    if not 0 <= lookup.get("visibility", 0) < len(_PJ_VISIBILITY.names):
+        raise gerr.internal_error()
+
+
+def _sheets_check_dimension_range(dimension_range: dict, sheets: list[_Sheet]) -> None:
+    """A lookup's `dimensionRange`, checked in the order real checks it (measured 2026-10-04 with
+    two members wrong at once): both indexes, exactly one row or column (`endIndex` one past
+    `startIndex`), both indexes non-negative, the sheet, a dimension, a dimension number the enum
+    does not declare (real's 500), and a start inside the grid."""
+    if "start_index" not in dimension_range or "end_index" not in dimension_range:
+        raise gerr.invalid_argument(
+            "DimensionRange must specify both a startIndex and an endIndex."
+        )
+    start, end = dimension_range["start_index"], dimension_range["end_index"]
+    # In Java int arithmetic: `startIndex: 2147483647, endIndex: -2147483648` passes this and is
+    # refused as negative, measured 2026-10-04.
+    if _int32(end - start) != 1:
+        raise gerr.invalid_argument("DimensionRange must represent a single row or column.")
+    if start < 0 or end < 0:
+        raise gerr.invalid_argument("DimensionRange indexes must be >= 0")
+    sheet_id = dimension_range.get("sheet_id", 0)
+    sheet = next((s for s in sheets if s.sheet_id == sheet_id), None)
+    if sheet is None:
+        raise gerr.invalid_argument(f"No grid with id: {sheet_id}")
+    dimension = dimension_range.get("dimension", 0)
+    if dimension == 0:
+        raise gerr.invalid_argument("No dimension specified")
+    if dimension not in (1, 2):
+        raise gerr.internal_error()
+    size, axis = (sheet.rows, "ROWS") if dimension == 1 else (sheet.cols, "COLUMNS")
+    if start >= size:
+        raise gerr.invalid_argument(
+            f"DimensionRange startIndex [{start}] is after the last {axis} index "
+            f"[{size - 1}] of the sheet [{sheet_id}]."
+        )
+
+
 def _sheets_selections(filters: list[dict], sheets: list[_Sheet], *, values_level: bool) -> list:
-    """What each filter selects, in the order sent: an A1 spec or an :class:`_Empty`.
+    """What each filter selects, in the order sent: an A1 spec, an :class:`_Empty`, or ``None`` for
+    a developer metadata lookup (:func:`_sheets_check_lookup`).
 
     Real checks the filters one at a time and answers the first that fails, measured 2026-10-04
-    with a failing filter on either side of another. The
+    with a failing filter on either side of another, a lookup's refusal and a range's alike. The
     values-level read puts `Invalid dataFilter[N]: ` in front of the refusal and the
     spreadsheet-level one does not. An `a1Range` is resolved here, past-grid check and all, so its
     refusal is reported against the filter that carried it."""
@@ -3613,6 +3715,9 @@ def _sheets_selections(filters: list[dict], sheets: list[_Sheet], *, values_leve
             elif "grid_range" in f:
                 word = "grid" if values_level else "sheet"
                 selections.append(_sheets_grid_selection(f["grid_range"], sheets, word))
+            elif "developer_metadata_lookup" in f:
+                _sheets_check_lookup(f["developer_metadata_lookup"], sheets)
+                selections.append(None)
             else:
                 raise gerr.invalid_argument("dataFilter.filter must be specified.")
         except gerr.GoogleError as exc:
@@ -3689,13 +3794,15 @@ async def sheets_values_batch_get_by_data_filter(spreadsheet_id: str, request: R
             return {"range": "#REF!", "majorDimension": major}
         return _sheets_value_range(selection, sheets, major, render)
 
-    out = {
-        "spreadsheetId": spreadsheet_id,
-        "valueRanges": [
+    out: dict = {"spreadsheetId": spreadsheet_id}
+    picked = [i for i, selection in enumerate(selections) if selection is not None]
+    if picked:
+        # A lookup selects nothing and leaves no entry; with nothing else, there is no
+        # `valueRanges` at all, measured 2026-10-04.
+        out["valueRanges"] = [
             {"valueRange": answer(selections[i]), "dataFilters": [_sheets_filter_echo(filters[i])]}
-            for i in sorted(range(len(selections)), key=where)
-        ],
-    }
+            for i in sorted(picked, key=where)
+        ]
     return _sheets_respond(request, out, _F_BATCH_BY_FILTER)
 
 
@@ -3706,12 +3813,14 @@ async def sheets_values_batch_get_by_data_filter(spreadsheet_id: str, request: R
 async def sheets_get_by_data_filter(spreadsheet_id: str, request: Request):
     """``spreadsheets.get`` addressed by DataFilter. Same response, and the filters scope the
     ``sheets`` array exactly as ``ranges`` does — measured, including that NO filter means every
-    sheet rather than the refusal its values-level sibling gives. The credential, the body, the
-    spreadsheet's lookup and the filters come in the order its sibling's docstring gives."""
+    sheet rather than the refusal its values-level sibling gives, and so does a list of developer
+    metadata lookups alone, which select nothing (measured 2026-10-04). The credential, the body,
+    the spreadsheet's lookup and the filters come in the order its sibling's docstring gives."""
     _require(request)
     body = protojson.read(await request.body(), _PJ_GET_BY_FILTER)
     row, sheets = _workbook(request, spreadsheet_id)
-    specs = _sheets_selections(body.get("data_filters", []), sheets, values_level=False)
+    selections = _sheets_selections(body.get("data_filters", []), sheets, values_level=False)
+    specs = [s for s in selections if s is not None]
     grid = body.get("include_grid_data", False)
     if mask := gerr.first_repeat(request.query_params, "fields"):
         grid = _gmask_wants_grid(mask)
