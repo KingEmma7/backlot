@@ -185,6 +185,26 @@ def not_downloadable() -> GoogleError:
     )
 
 
+def supports_all_drives_required() -> GoogleError:
+    """`files.list` asked for shared-drive items without saying it supports shared drives. No
+    `location` and no `status`, measured 2026-10-04."""
+    return GoogleError(
+        403,
+        "The supportsAllDrives parameter was not set to true.",
+        reason="supportsTeamDrivesRequired",
+    )
+
+
+def abuse_acknowledgment_not_applicable() -> GoogleError:
+    """`files.get` acknowledged abuse on a read that downloads nothing. Measured 2026-10-04."""
+    return GoogleError(
+        403,
+        "The acknowledgeAbuse parameter is only applicable for download requests.",
+        reason="invalidAbuseAcknowledgment",
+        location="acknowledgeAbuse",
+    )
+
+
 def invalid_argument(message: str) -> GoogleError:
     """The editor APIs' generic 400. Its `errors[]` entry, shown at `$.xgafv=1`, is ``badRequest``
     under ``global`` — measured on an unparseable range, a range past the grid, an unsupported

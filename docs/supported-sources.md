@@ -307,6 +307,15 @@ matching the format without regard to case, refuses an absent `mimeType` ahead o
 up, and serves an export under the `mimeType` exactly as sent, with no `charset`. Measured against
 the live Drive and Sheets APIs on 2026-09-23, and the export's `Content-Type` on 2026-09-30.
 
+**Four Drive flags spelled `true`, in any case, run a check of their own**, where `1`, `t` and `yes`
+parse as true and run none. `includeItemsFromAllDrives` or `includeTeamDriveItems` on `files.list`
+without `supportsAllDrives` or `supportsTeamDrives` spelled the same way is 403
+`supportsTeamDrivesRequired`, between the `orderBy` and `q` refusals. `acknowledgeAbuse` on a
+`files.get` that downloads nothing is 403 `invalidAbuseAcknowledgment`, before the file is looked
+up. `useDomainAdminAccess`, since no caller here is a domain administrator, is 404 `File not found`
+on `permissions.list` and 400 `Invalid Value` at `q` on `drives.list`. Each flag is read from its
+first repeat. Measured against the live Drive API on 2026-10-04.
+
 ### HubSpot — `/hubspot/crm/v3` `/hubspot/crm/v4`
 
 | Endpoint | Notes |

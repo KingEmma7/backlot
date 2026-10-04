@@ -1064,9 +1064,8 @@ def test_drive_a_declared_boolean_takes_the_protobuf_spellings_and_another_is_ig
     client, admin_h, path, param, value, accepted
 ):
     """The spellings `_DRIVE_BOOLS` records, one request per value on each route; the `files.list`
-    `supportsAllDrives` rows are 24 of the 30 swept. `true` is sent on those rows alone: measured
-    2026-09-23, four of the other flags answer a `true` with a check of their own (a 403 for
-    `includeItemsFromAllDrives` without `supportsAllDrives`), which Backlot does not model."""
+    `supportsAllDrives` rows are 24 of the 30 swept. `true` is sent on those rows alone: four of the
+    other flags answer a `true` with a check of their own, which `_DRIVE_CHECK_ROWS` holds."""
     doc = _drive_find(client, admin_h, "Brand")["id"]
     url = path.format(doc=doc)
     # the query string is built here because httpx's `params` replaces the one the row's path has
@@ -1079,6 +1078,124 @@ def test_drive_a_declared_boolean_takes_the_protobuf_spellings_and_another_is_ig
     e = _gerr(r)
     assert (e["code"], e["message"]) == (400, message)
     assert e["details"][0]["fieldViolations"] == [{"field": field, "description": message}]
+
+
+_SHARED_DRIVES = (
+    403,
+    "supportsTeamDrivesRequired",
+    None,
+    "The supportsAllDrives parameter was not set to true.",
+)
+_ABUSE = (
+    403,
+    "invalidAbuseAcknowledgment",
+    "acknowledgeAbuse",
+    "The acknowledgeAbuse parameter is only applicable for download requests.",
+)
+_SERVED = (200, None, None, None)
+_TYPED = (400, "invalid", None, None)
+_RANGE = (400, "invalidParameter", "page_size", None)
+
+# A Drive request beside real's answer, one request per row: the route, its query and who sends it,
+# then the status and `errors[0]`'s reason, location and, for the two 403s a flag spelled `true` is
+# refused with (`_drive_true`), message. The `1` spellings, which parse as true and run no check,
+# are rows of `_DRIVE_BOOL_ROWS`.
+# fmt: off
+_DRIVE_CHECK_ROWS = [
+    # the export and download refusals
+    ("/drive/v3/files/{pdf}/export", "mimeType=text/plain", "admin", (403, "fileNotExportable", None, None)),
+    # the empty value is present, so in the order `drive_files_export` records it meets the 403
+    ("/drive/v3/files/{pdf}/export", "mimeType=", "admin", (403, "fileNotExportable", None, None)),
+    ("/drive/v3/files/{doc}", "alt=media", "admin", (403, "fileNotDownloadable", "alt", None)),
+    # the shared-drive items need a companion flag, which the same spelling turns on
+    ("/drive/v3/files", "includeItemsFromAllDrives=true", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=TRUE", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=tRuE", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=t", "admin", _SERVED),
+    ("/drive/v3/files", "includeItemsFromAllDrives=yes", "admin", _SERVED),
+    ("/drive/v3/files", "includeTeamDriveItems=true", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=tRuE", "admin", _SERVED),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=t", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=1", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=yes", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsTeamDrives=true", "admin", _SERVED),
+    ("/drive/v3/files", "includeTeamDriveItems=true&supportsTeamDrives=true", "admin", _SERVED),
+    ("/drive/v3/files", "includeTeamDriveItems=true&supportsTeamDrives=1", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeTeamDriveItems=true&supportsAllDrives=true", "admin", _SERVED),
+    # each read from its first repeat
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&includeItemsFromAllDrives=false", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=false&includeItemsFromAllDrives=true", "admin", _SERVED),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=false&supportsAllDrives=true", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=true&supportsAllDrives=false", "admin", _SERVED),
+    # its place among the other refusals, which `drive_files_list` records
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&supportsAllDrives=NOPE", "admin", _TYPED),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&pageSize=0", "admin", _RANGE),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&orderBy=bogus", "admin", (400, "invalid", "orderBy", None)),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&q=bad", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&pageToken=bad", "admin", _SHARED_DRIVES),
+    ("/drive/v3/files", "includeItemsFromAllDrives=true&fields=bad", "admin", _SHARED_DRIVES),
+    # acknowledging abuse on a read that downloads nothing
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=true", "admin", _ABUSE),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=TRUE", "admin", _ABUSE),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=t", "admin", _SERVED),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=true&acknowledgeAbuse=false", "admin", _ABUSE),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=false&acknowledgeAbuse=true", "admin", _SERVED),
+    ("/drive/v3/files/{pdf}", "acknowledgeAbuse=true&alt=media", "admin", _SERVED),
+    ("/drive/v3/files/{pdf}", "acknowledgeAbuse=true&alt=json", "admin", _ABUSE),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=true&alt=media", "admin", (403, "fileNotDownloadable", "alt", None)),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=true&fields=bad", "admin", _ABUSE),
+    ("/drive/v3/files/{doc}", "acknowledgeAbuse=true&supportsAllDrives=NOPE", "admin", _TYPED),
+    # before the lookup: a file that does not exist and one the caller cannot see, beside the
+    # second without the flag
+    ("/drive/v3/files/{nope}", "acknowledgeAbuse=true", "admin", _ABUSE),
+    ("/drive/v3/files/{hidden}", "acknowledgeAbuse=true", "mia", _ABUSE),
+    ("/drive/v3/files/{hidden}", "acknowledgeAbuse=false", "mia", (404, "notFound", "fileId", None)),
+    ("/drive/v3/files/{hidden}", "acknowledgeAbuse=false", "admin", _SERVED),
+    # the routes that declare no such check
+    ("/drive/v3/files/{doc}/export", "mimeType=text/plain&acknowledgeAbuse=true", "admin", _SERVED),
+    ("/drive/v3/about", "fields=user&includeItemsFromAllDrives=true", "admin", _SERVED),
+    # a domain administrator's access, which no caller here has
+    ("/drive/v3/files/{doc}/permissions", "useDomainAdminAccess=true", "admin", (404, "notFound", "fileId", None)),
+    ("/drive/v3/files/{doc}/permissions", "useDomainAdminAccess=TRUE", "admin", (404, "notFound", "fileId", None)),
+    ("/drive/v3/files/{hidden}/permissions", "useDomainAdminAccess=true", "mia", (404, "notFound", "fileId", None)),
+    ("/drive/v3/files/{hidden}/permissions", "useDomainAdminAccess=false", "mia", (404, "notFound", "fileId", None)),
+    ("/drive/v3/files/{hidden}/permissions", "useDomainAdminAccess=false", "admin", _SERVED),
+    ("/drive/v3/files/{doc}/permissions", "useDomainAdminAccess=true&pageSize=0", "admin", _RANGE),
+    ("/drive/v3/files/{doc}/permissions", "useDomainAdminAccess=true&supportsAllDrives=NOPE", "admin", _TYPED),
+    ("/drive/v3/drives", "useDomainAdminAccess=true", "admin", (400, "invalid", "q", None)),
+    ("/drive/v3/drives", "useDomainAdminAccess=TRUE", "admin", (400, "invalid", "q", None)),
+    ("/drive/v3/drives", "useDomainAdminAccess=true&pageSize=0", "admin", _RANGE),
+    ("/drive/v3/drives", "useDomainAdminAccess=true&q=name%3D%27x%27", "admin", (400, "invalid", "q", None)),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize("path, query, caller, expected", _DRIVE_CHECK_ROWS)
+def test_drive_answers_each_check_with_reals_status_and_reason(
+    client, admin_h, tokens, path, query, caller, expected
+):
+    """The rows `_DRIVE_CHECK_ROWS` records. The 403 for a file the scoped token cannot see is the
+    one for a file that does not exist, and both name no file, so the check tells the caller
+    nothing about what it cannot read; the permissions 404 names the file it was asked about, and
+    is the same 404 the scoped token gets for that file without the flag."""
+    ids = {
+        "doc": _drive_find(client, admin_h, "Brand")["id"],
+        "pdf": _drive_find(client, admin_h, "Whitepaper")["id"],
+        "hidden": _drive_find(client, admin_h, "Q1 Revenue Model")["id"],
+        "nope": "nosuchfile000",
+    }
+    headers = (
+        admin_h if caller == "admin" else {"Authorization": f"Bearer {tokens['mia@acme.com']}"}
+    )
+    r = client.get(f"{path.format(**ids)}?{query}", headers=headers)
+    status, reason, location, message = expected
+    assert r.status_code == status, r.text
+    if status == 200:
+        return
+    e = _gerr(r)
+    assert (e["errors"][0].get("reason"), e["errors"][0].get("location")) == (reason, location)
+    if message is not None:
+        assert (e["message"], "status" in e) == (message, False)
 
 
 @pytest.mark.parametrize(
@@ -1130,24 +1247,6 @@ def test_drive_a_blank_fields_mask_selects_nothing(client, admin_h, mask):
         assert client.get(path, headers=admin_h).json(), path
     about = _gerr(client.get(ABOUT, headers=admin_h, params={"fields": mask}))
     assert about["message"] == "The 'fields' parameter is required for this method."
-
-
-@pytest.mark.parametrize(
-    "path, reason, location",
-    [
-        ("/drive/v3/files/{pdf}/export?mimeType=text/plain", "fileNotExportable", None),
-        # the empty value is present, so in the order `drive_files_export` records it meets the 403
-        ("/drive/v3/files/{pdf}/export?mimeType=", "fileNotExportable", None),
-        ("/drive/v3/files/{doc}?alt=media", "fileNotDownloadable", "alt"),
-    ],
-)
-def test_drive_403s_carry_their_own_reasons(client, admin_h, path, reason, location):
-    doc = _drive_find(client, admin_h, "Brand")["id"]
-    pdf = _drive_find(client, admin_h, "Whitepaper")["id"]
-    e = _gerr(client.get(path.format(doc=doc, pdf=pdf), headers=admin_h))
-    assert e["code"] == 403
-    assert e["errors"][0]["reason"] == reason
-    assert e["errors"][0].get("location") == location
 
 
 BAD_TOKEN = {"Authorization": "Bearer not-a-real-token"}

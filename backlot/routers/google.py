@@ -1910,6 +1910,8 @@ async def drive_shared_drives(request: Request):
     _drive_page_size_in_range(
         _drive_typed(request, "useDomainAdminAccess", page_size=True)["pageSize"], 100
     )
+    if _drive_true(request, "useDomainAdminAccess"):  # with a `q` sent and without one
+        raise gerr.invalid_value("q")
     return {"kind": "drive#driveList", "drives": []}
 
 
@@ -1926,7 +1928,8 @@ async def drive_files_list(request: Request):
     me = caller.email
     # Each read off the first repeat, as real reads them -- see `gerr.first_repeat`. Refused in
     # real's order, measured 2026-09-23 by sending two bad values at once: `pageSize` first, then
-    # `orderBy`, `q`, `pageToken` and `fields`, whichever order the query names them in.
+    # `orderBy`, `q`, `pageToken` and `fields`, whichever order the query names them in, and on
+    # 2026-10-04 the shared-drive 403 between `orderBy` and `q`.
     params = request.query_params
     typed = _drive_typed(
         request,
@@ -1938,6 +1941,13 @@ async def drive_files_list(request: Request):
     )
     limit = _drive_page_size(typed["pageSize"])
     order = _drive_order_specs(gerr.first_repeat(params, "orderBy"))  # 400 on an unusable key
+    shared_items = _drive_true(request, "includeItemsFromAllDrives") or _drive_true(
+        request, "includeTeamDriveItems"
+    )
+    if shared_items and not (
+        _drive_true(request, "supportsAllDrives") or _drive_true(request, "supportsTeamDrives")
+    ):
+        raise gerr.supports_all_drives_required()
     q = gerr.first_repeat(params, "q") or ""
     query = _drive_q_parse(q)  # 400 on a clause Backlot cannot evaluate; None when there is no q
     # Measured 2026-09-23: a token the API did not issue is 400 `Invalid Value`, where an empty one
@@ -2037,7 +2047,12 @@ async def drive_files_list(request: Request):
 async def drive_files_get(file_id: str, request: Request):
     conn = auth.conn(request)
     caller = _require(request)
+    download = gerr.alt_format(request.query_params) == "media"
     _drive_typed(request, "acknowledgeAbuse", "supportsAllDrives", "supportsTeamDrives")
+    # Measured 2026-10-04: before the lookup, so a file that does not exist is refused alike, and
+    # before `fields`.
+    if not download and _drive_true(request, "acknowledgeAbuse"):
+        raise gerr.abuse_acknowledgment_not_applicable()
     ids = auth.visible_ids(request, caller)
     row = store.gdrive_by_id(conn, file_id, visible_ids=ids)
     if row is None:
@@ -2118,6 +2133,8 @@ async def drive_files_permissions(file_id: str, request: Request):
         request, "supportsAllDrives", "supportsTeamDrives", "useDomainAdminAccess", page_size=True
     )["pageSize"]
     _drive_page_size_in_range(sizes, 100)
+    if _drive_true(request, "useDomainAdminAccess"):  # even for a file the caller owns
+        raise gerr.not_found_file(file_id)
     ids = auth.visible_ids(request, caller)
     row = store.gdrive_by_id(conn, file_id, visible_ids=ids)
     if row is None:
@@ -3790,10 +3807,11 @@ def _typed_query(request: Request, readers: dict) -> dict[str, list]:
 
 
 # The typed booleans each Drive method Backlot serves declares, as the proto field its refusal
-# names. Parsed only, never read: none of them changes what a My Drive corpus answers. Measured
-# 2026-09-23 on each of them: the Sheets boolean spellings (`_sheets_bool_value`), 30 of them swept
-# on `supportsAllDrives`. `files.export` and `about.get` declare none, and real ignores
-# `supportsAllDrives=NOPE` on both.
+# names. Each is parsed and the parsed value never read. Measured 2026-09-23 on each of them: the
+# Sheets boolean spellings (`_sheets_bool_value`), 30 of them swept on `supportsAllDrives`. Spelled
+# `true`, four of them run a check of their own and two lift one, which `_drive_true` reads from the
+# spelling. `files.export` and `about.get` declare none, and real ignores `supportsAllDrives=NOPE`
+# on both.
 _DRIVE_BOOLS = {
     "supportsAllDrives": "supports_all_drives",
     "supportsTeamDrives": "supports_team_drives",
@@ -3814,6 +3832,21 @@ def _drive_typed(request: Request, *bools: str, page_size: bool = False) -> dict
     if page_size:
         readers["pageSize"] = _drive_int32
     return _typed_query(request, readers)
+
+
+def _drive_true(request: Request, name: str) -> bool:
+    """Whether a Drive flag's first repeat is the word `true`, in any case.
+
+    Four flags run a check of their own when they are true, and the check reads the spelling rather
+    than the boolean `_drive_typed` parses. Measured 2026-10-04 on `files.list`'s
+    `includeItemsFromAllDrives`: `true`, `TRUE` and `tRuE` run it, while `t`, `1`, `y` and `yes`,
+    which parse as true, do not; and `supportsAllDrives` lifts it at `true` and not at `t`, `1` or
+    `yes`. `true&false` runs it and `false&true` does not.
+
+    Measured the same day, `useDomainAdminAccess` is answered the way real answers a caller who is
+    not a domain administrator, which no caller here is: 404 for the file on `permissions.list` and
+    400 at `q` on `drives.list`."""
+    return (gerr.first_repeat(request.query_params, name) or "").casefold() == "true"
 
 
 # An int32 as the Drive query parser takes one. Measured on `pageSize`, on `files.list` 2026-09-23
