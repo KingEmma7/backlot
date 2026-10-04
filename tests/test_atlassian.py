@@ -1708,18 +1708,90 @@ def test_jira_refuses_an_unconvertible_parameter_before_resolving_the_issue(page
     )
 
 
-def test_confluence_cql_search_keeps_its_own_lenient_read(client, admin_h):
-    """The CQL route is not Spring-bound: a value it cannot convert is a bodiless 404 on real, not
-    `content`'s 400 (#216). Serving `content`'s refusal here would trade one divergence for
-    another, so it keeps the lenient read — but the NEGATIVE refusal is measured on this route too
-    and is shared."""
-    ok = client.get("/atlassian/wiki/rest/api/search?cql=type%3Dpage&limit=abc", headers=admin_h)
-    assert ok.status_code == 200, ok.text
-    neg = client.get("/atlassian/wiki/rest/api/search?cql=type%3Dpage&start=-1", headers=admin_h)
-    assert neg.status_code == 400, neg.text
-    assert neg.json()["message"] == (
-        "java.lang.IllegalArgumentException: start cannot be less than zero"
-    )
+# The CQL search's `limit` and `start`, each request as real answered it (`_cql_page_param`): the
+# query, then the status and the answer — on a 200 the `limit` and `start` echoed, on a 400 the
+# message, on a 404 nothing, since that one has no body and no `content-type`.
+# fmt: off
+_CQL_INT_ROWS = [
+    ("cql=type%3Dpage&limit=abc", 404, None),
+    ("cql=type%3Dpage&limit=1.5", 404, None),
+    ("cql=type%3Dpage&limit=1_0", 404, None),
+    ("cql=type%3Dpage&limit=2147483648", 404, None),
+    ("cql=type%3Dpage&limit=-2147483649", 404, None),
+    ("cql=type%3Dpage&limit=0x10", 404, None),
+    ("cql=type%3Dpage&limit=1e3", 404, None),
+    ("cql=type%3Dpage&limit=%205", 404, None),
+    ("cql=type%3Dpage&limit=5%20", 404, None),
+    ("cql=type%3Dpage&limit=%095%09", 404, None),
+    ("cql=type%3Dpage&limit=5%0A", 404, None),
+    ("cql=type%3Dpage&limit=%2B", 404, None),
+    ("cql=type%3Dpage&limit=-", 404, None),
+    ("cql=type%3Dpage&limit=%E2%81%B5", 404, None),
+    ("cql=type%3Dpage&limit=%EF%BC%8B5", 404, None),
+    ("cql=type%3Dpage&limit=%C2%A0", 404, None),
+    ("cql=type%3Dpage&limit=%F0%9D%9F%93", 404, None),
+    ("cql=type%3Dpage&limit=%F0%91%81%AB", 404, None),
+    ("cql=type%3Dpage&start=%F0%9D%9F%93&limit=1", 404, None),
+    ("cql=type%3Dpage&start=abc&limit=1", 404, None),
+    ("cql=type%3Dpage&start=1_0&limit=1", 404, None),
+    ("cql=type%3Dpage&start=2147483648&limit=1", 404, None),
+    ("cql=type%3Dpage&start=%201&limit=1", 404, None),
+    ("cql=type%3Dpage&start=%C2%A0&limit=1", 404, None),
+    ("cql=type%3Dpage&start=%2B&limit=1", 404, None),
+    ("cql=type%3Dpage&limit=abc&limit=5", 404, None),
+    ("cql=type%3Dpage&limit=abc&start=-1", 404, None),
+    ("cql=type%3Dpage&limit=-1&start=abc", 404, None),
+    ("limit=abc", 404, None),
+    ("cql=space%3DNOPE&limit=abc", 404, None),
+    ("cql=type%3Dpage&limit=2147483647", 200, (2147483647, 0)),
+    ("cql=type%3Dpage&limit=%2B5", 200, (5, 0)),
+    ("cql=type%3Dpage&limit=05", 200, (5, 0)),
+    ("cql=type%3Dpage&limit=0002", 200, (2, 0)),
+    ("cql=type%3Dpage&limit=-0", 200, (0, 0)),
+    ("cql=type%3Dpage&limit=0", 200, (0, 0)),
+    ("cql=type%3Dpage&limit=%20", 200, (25, 0)),
+    ("cql=type%3Dpage&limit=", 200, (25, 0)),
+    ("cql=type%3Dpage&limit=%09", 200, (25, 0)),
+    ("cql=type%3Dpage&limit=%0A", 200, (25, 0)),
+    ("cql=type%3Dpage&limit=%0D%0A", 200, (25, 0)),
+    ("cql=type%3Dpage&limit=%EF%BC%95", 200, (5, 0)),
+    ("cql=type%3Dpage&limit=%D9%A5", 200, (5, 0)),
+    ("cql=type%3Dpage&limit=%D9%A1%D9%A2", 200, (12, 0)),
+    ("cql=type%3Dpage&limit=1%D9%A2", 200, (12, 0)),
+    ("cql=type%3Dpage&limit=%E0%A5%A8", 200, (2, 0)),
+    ("cql=type%3Dpage&start=%2B1&limit=1", 200, (1, 1)),
+    ("cql=type%3Dpage&start=&limit=1", 200, (1, 0)),
+    ("cql=type%3Dpage&start=%20&limit=1", 200, (1, 0)),
+    ("cql=type%3Dpage&start=-0&limit=1", 200, (1, 0)),
+    ("cql=type%3Dpage&start=%EF%BC%91&limit=1", 200, (1, 1)),
+    ("cql=type%3Dpage&limit=5&limit=abc", 200, (5, 0)),
+    ("cql=type%3Dpage&limit=&limit=5", 200, (25, 0)),
+    ("cql=type%3Dpage&limit=5&limit=2", 200, (5, 0)),
+    ("cql=type%3Dpage&start=1&start=2&limit=1", 200, (1, 1)),
+    ("cql=type%3Dpage&limit=-1", 400, 'java.lang.IllegalArgumentException: limit cannot be less than zero'),
+    ("cql=type%3Dpage&start=-1&limit=1", 400, 'java.lang.IllegalArgumentException: start cannot be less than zero'),
+    ("cql=type%3Dpage&limit=-2147483648", 400, 'java.lang.IllegalArgumentException: limit cannot be less than zero'),
+    ("cql=type%3Dpage&start=-2147483648&limit=1", 400, 'java.lang.IllegalArgumentException: start cannot be less than zero'),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize("query, status, answer", _CQL_INT_ROWS)
+def test_confluence_cql_search_reads_limit_and_start_as_jaxrs_does(
+    client, admin_h, query, status, answer
+):
+    r = client.get(f"/atlassian/wiki/rest/api/search?{query}", headers=admin_h)
+    assert r.status_code == status, r.text
+    if status == 404:
+        assert (r.content, r.headers.get("content-type"), r.headers["content-length"]) == (
+            b"",
+            None,
+            "0",
+        )
+    elif status == 400:
+        assert r.json() == {"statusCode": 400, "message": answer}
+    else:
+        assert (r.json()["limit"], r.json()["start"]) == answer
 
 
 def test_confluence_refuses_a_whitespace_only_value_where_jira_reads_it_as_absent(client, admin_h):

@@ -1338,14 +1338,11 @@ async def confluence_cql_search(request: Request):
     want_type = mt.group(1) if mt else None
     ml = re.search(r'label\s*(?:=|in)\s*"?([^")\s]+)"?', cql)
     want_label = ml.group(1) if ml else None
-    # NOT `_confluence_page_params`: this route is not bound by Spring the way `content` is, and a
-    # value it cannot convert is a bodiless 404 (JAX-RS's answer for a `@QueryParam`) rather than
-    # the Spring 400 — while `?limit=%20` and `?limit=` are 200 with the default. Serving `content`'s
-    # refusal here would trade one divergence for another, so the lenient read stays until #216
-    # reproduces the 404. The NEGATIVE check is shared, and measured on this route: `?limit=-1` and
-    # `?start=-1` are the same `IllegalArgumentException` 400 `content` gives.
-    limit = _int(request.query_params.get("limit"), 25)
-    start = _int(request.query_params.get("start"), 0)
+    # Not `_confluence_page_params`: see `_cql_page_param`.
+    limit = _cql_page_param(request, "limit", 25)
+    start = _cql_page_param(request, "start", 0)
+    if limit is None or start is None:
+        return Response(status_code=404)
     _refuse_negative_page_params(limit, start)
 
     # fetch the full ACL-visible match set, filter by the clauses, then paginate — so
@@ -1757,20 +1754,6 @@ def _confluence_page(conn, request: Request, row, expand: str) -> dict:
     return page
 
 
-def _int(v, default: int) -> int:
-    """One of Confluence's CQL query parameters (`limit`, `start`), read leniently: `int(v)`, or
-    `default` for `None`, `""`, or anything `int()` itself refuses.
-
-    Deliberately lenient rather than routed through :func:`_int_param`'s Spring rules: CQL's own
-    route is not Spring-bound (see the comment at its call site), so a value it cannot convert is a
-    refusal this function does not reproduce.
-    """
-    try:
-        return int(v) if v not in (None, "") else default
-    except (ValueError, TypeError):
-        return default
-
-
 # What real converts a query parameter with. Measured on brekkylab.atlassian.net, 2026-09-14,
 # against Jira's comment read and Confluence's space listing, which agree on every case:
 #
@@ -1938,9 +1921,8 @@ def _confluence_page_params(
     `limit` — and among two negatives `start` is the one named: `?limit=-1&start=-1` reports
     `start cannot be less than zero`.
 
-    The CQL search reads its own pair: it is not Spring-bound and refuses a value it cannot convert
-    as a bodiless 404. It shares :func:`_refuse_negative_page_params`, which is measured on that
-    route too.
+    The CQL search reads its own pair (:func:`_cql_page_param`), JAX-RS-bound rather than Spring's,
+    and shares :func:`_refuse_negative_page_params`, which is measured on that route too.
 
     ``start_bound`` is `content`'s alone and sits between the two refusals above, measured with
     both wrong at once: `?limit=abc&start=100001` is the conversion failure, `?limit=-1&
@@ -1968,6 +1950,34 @@ def _confluence_page_params(
     if cap is not None:
         limit = min(limit, cap)
     return limit, start
+
+
+# What Java's `String.trim()` removes: every character up to and including the space.
+_JAVA_TRIMMED = "".join(map(chr, range(0x21)))
+
+
+def _cql_page_param(request: Request, name: str, default: int) -> int | None:
+    """The CQL search's `limit` or `start`, read the way its JAX-RS binding reads an `int`, or
+    ``None`` where real answers the 404 with no body and no `content-type` a `@QueryParam` it
+    cannot convert gets.
+
+    Measured 2026-10-04 on a live site, with an `Accept` that takes JSON: the first of a repeated
+    parameter is the one read (`limit=5&limit=abc` is five, `limit=abc&limit=5` the 404); an empty
+    value or one `trim()` empties (a space, a tab, a newline) is the default; anything else is
+    `Integer.valueOf` of the value as sent, so a sign and leading zeros pass and a Unicode decimal
+    digit counts (`٥` and `５` are five) unless it lies past U+FFFF, which Java reads as two halves
+    of a surrogate pair (`𝟓` is the 404), where a space beside the digits, `1.5`, `1_0`, `0x10`,
+    `1e3` and a value outside `int` are the 404 too. The 404 comes after the credential's refusal
+    and before every other one the route makes. A NUL never gets this far: Tomcat answers it with an
+    HTML 400 page.
+    """
+    values = request.query_params.getlist(name)
+    if not values or not values[0].strip(_JAVA_TRIMMED):
+        return default
+    if not re.fullmatch(r"[+-]?\d+", values[0]) or max(map(ord, values[0])) > 0xFFFF:
+        return None
+    value = int(values[0])
+    return value if -(2**31) <= value < 2**31 else None
 
 
 # The `start` past which `content` answers `start_too_large`. The same `start` is a 200 on the
