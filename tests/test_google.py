@@ -658,6 +658,166 @@ def test_google_batch_honors_subrequest_query_params(client, admin_h, uri):
     )  # format=minimal honored
 
 
+_REDIRECTED = {
+    "error": {
+        "code": 302,
+        "message": "Unknown Error.",
+        "errors": [{"message": "Unknown Error.", "domain": "global", "reason": "backendError"}],
+        "status": "UNKNOWN",
+    }
+}
+_UNIMPLEMENTED_MESSAGE = "Operation is not implemented, or supported, or enabled."
+_UNIMPLEMENTED = {
+    "error": {"code": 501, "message": _UNIMPLEMENTED_MESSAGE, "status": "UNIMPLEMENTED"}
+}
+_UNIMPLEMENTED_AT_XGAFV_1 = {
+    "error": {
+        **_UNIMPLEMENTED["error"],
+        "errors": [
+            {"message": _UNIMPLEMENTED_MESSAGE, "domain": "global", "reason": "notImplemented"}
+        ],
+    }
+}
+_DRIVE_BATCH = "/batch/drive/v3?quotaUser=7"
+_SHEETS_BATCH = "/batch?quotaUser=7"
+_BAD = "Bearer nope"
+_MIA = "{mia}"  # the scoped token, which cannot see the spreadsheet
+_ANON = "anonymous"  # no credential on the part or on the batch
+_NORMALISED = "/batch/drive/v3?quotaUser=7&foo=%41&b%61r=1&~t=%7e&&"
+_A1_FILTER = '{"dataFilters": [{"a1Range": "A1"}]}'
+
+# One part per batch, as real's Drive batch and Sheets batch answered it. A row is the batch URI
+# with its query, the part as (method, target, body, its own Authorization), the status in the batch
+# and the status of the same request sent on its own (``None`` where the row does not compare it:
+# not measured, or, on the export with an empty `alt=`, real's 400, which Backlot does not give),
+# then a 302's `Location` below the server's base URL or a 501's body. `_drive_batch_download` and
+# `_workbook` record the rules.
+# fmt: off
+_BATCH_ROWS = [
+    # a Drive download is redirected, whatever else the request says
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{sheet}/export?mimeType=text/csv", None, None), 302, 200, "download/drive/v3/files/{sheet}/export?mimeType=text/csv&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=", None, None), 302, 400, "download/drive/v3/files/{doc}/export?mimeType=&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export", None, None), 302, 400, "download/drive/v3/files/{doc}/export?quotaUser=7"),
+    ("/batch/drive/v3", ("GET", "/drive/v3/files/{doc}/export", None, None), 302, 400, "download/drive/v3/files/{doc}/export"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{nope}/export?mimeType=text/plain", None, None), 302, 404, "download/drive/v3/files/{nope}/export?mimeType=text/plain&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{sheet}/export?mimeType=text/csv", None, _MIA), 302, 404, "download/drive/v3/files/{sheet}/export?mimeType=text/csv&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&alt=media", None, None), 302, 200, "download/drive/v3/files/{doc}/export?mimeType=text/plain&alt=media&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&alt=", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&alt=&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media", None, None), 302, 200, "download/drive/v3/files/{pdf}?alt=media&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=MEDIA", None, None), 302, 200, "download/drive/v3/files/{pdf}?alt=MEDIA&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media&alt=json", None, None), 302, 200, "download/drive/v3/files/{pdf}?alt=media&alt=json&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{nope}?alt=media", None, None), 302, None, "download/drive/v3/files/{nope}?alt=media&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}?alt=media", None, None), 302, 403, "download/drive/v3/files/{doc}?alt=media&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media&supportsAllDrives=NOPE", None, None), 302, None, "download/drive/v3/files/{pdf}?alt=media&supportsAllDrives=NOPE&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media&fields=bogus", None, None), 302, None, "download/drive/v3/files/{pdf}?alt=media&fields=bogus&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media&acknowledgeAbuse=true", None, None), 302, 200, "download/drive/v3/files/{pdf}?alt=media&acknowledgeAbuse=true&quotaUser=7"),
+    # the batch's query follows the part's, less each name the part's query carries
+    ("/batch/drive/v3?quotaUser=7&prettyPrint=false", ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&prettyPrint=true", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&prettyPrint=true&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media&quotaUser=PARTQ", None, None), 302, 200, "download/drive/v3/files/{pdf}?alt=media&quotaUser=PARTQ"),
+    ("/batch/drive/v3?quotaUser=7&foo=1&foo=2", ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&Foo=3", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&Foo=3&quotaUser=7&foo=1&foo=2"),
+    ("/batch/drive/v3?quotaUser=7&foo=1&foo=2", ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&foo=", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&foo=&quotaUser=7"),
+    ("/batch/drive/v3?quotaUser=7&a%20b=c%2Fd&e=f+g&h", ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&quotaUser=7&a%20b=c%2Fd&e=f+g&h="),
+    # its pairs as real writes them: an empty one dropped, an escaped letter or digit decoded, any
+    # other escape's hex in upper case, a bare name given `=`, and names matched as written
+    (_NORMALISED, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&&y=%41", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&y=A&quotaUser=7&foo=A&bar=1&~t=%7E"),
+    (_NORMALISED, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&fo%6F=3", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&foo=3&quotaUser=7&bar=1&~t=%7E"),
+    (_NORMALISED, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&x%2Dy=1&x%2fy=2", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&x%2Dy=1&x%2Fy=2&quotaUser=7&foo=A&bar=1&~t=%7E"),
+    (_NORMALISED, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&n=%7E&k=%4a&z", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&n=%7E&k=J&z=&quotaUser=7&foo=A&bar=1&~t=%7E"),
+    (_NORMALISED, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&~t=1", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&~t=1&quotaUser=7&foo=A&bar=1"),
+    ("/batch/drive/v3?quotaUser=7&n%31=%32", ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&d=%31&dot=%2E&us=%5F&pct=%25&q=%3f", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&d=1&dot=%2E&us=%5F&pct=%25&q=%3F&quotaUser=7&n1=2"),
+    ("/batch/drive/v3?quotaUser=7&n%31=%32", ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&n1=9", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&n1=9&quotaUser=7"),
+    # its place among `$.xgafv`, the credential and `callback`, as `_drive_batch_redirect` records
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain", None, _BAD), 401, 401, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain", None, _ANON), 302, 403, "download/drive/v3/files/{doc}/export?mimeType=text/plain&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media", None, _ANON), 302, None, "download/drive/v3/files/{pdf}?alt=media&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}", None, _ANON), 403, None, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&callback=cb", None, None), 302, 200, "download/drive/v3/files/{doc}/export?mimeType=text/plain&callback=cb&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&callback=a%20b", None, None), 302, None, "download/drive/v3/files/{doc}/export?mimeType=text/plain&callback=a%20b&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=media&callback=a%20b", None, None), 302, None, "download/drive/v3/files/{pdf}?alt=media&callback=a%20b&quotaUser=7"),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/export?mimeType=text/plain&callback=a%20b&$.xgafv=9", None, None), 400, None, None),
+    # what is not a download is answered as it is on its own, but for the check of a part's own
+    # `acknowledgeAbuse`
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{pdf}?alt=json&alt=media", None, None), 200, 200, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}?acknowledgeAbuse=TRUE", None, None), 200, 403, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{nope}?acknowledgeAbuse=true", None, None), 404, 403, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files?pageSize=1&includeItemsFromAllDrives=true", None, None), 403, 403, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/files/{doc}/permissions?useDomainAdminAccess=true", None, None), 404, 404, None),
+    (_DRIVE_BATCH, ("GET", "/drive/v3/drives?useDomainAdminAccess=true", None, None), 400, 400, None),
+    # a Sheets read is not implemented, after the credential and the typed values and before the
+    # lookup
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/A1", None, None), 501, 200, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}", None, None), 501, 200, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values:batchGet?ranges=A1", None, None), 501, 200, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("POST", "/sheets/v4/spreadsheets/{sheet}:getByDataFilter", "{}", None), 501, 200, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("POST", "/sheets/v4/spreadsheets/{sheet}/values:batchGetByDataFilter", _A1_FILTER, None), 501, 200, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{nope}/values/A1", None, None), 501, 404, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/A1", None, _MIA), 501, 404, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/NoSuchSheet!A1", None, None), 501, 400, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/A1?alt=media", None, None), 501, 400, _UNIMPLEMENTED),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/A1?$.xgafv=1", None, None), 501, 200, _UNIMPLEMENTED_AT_XGAFV_1),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/A1?majorDimension=NOPE", None, None), 400, 400, None),
+    (_SHEETS_BATCH, ("GET", "/sheets/v4/spreadsheets/{sheet}/values/A1", None, _BAD), 401, 401, None),
+    (_SHEETS_BATCH, ("POST", "/sheets/v4/spreadsheets/{sheet}:getByDataFilter", "{}", _BAD), 401, 401, None),
+]
+# fmt: on
+
+
+def _batch_answer(client, headers, uri, method, target, body, auth):
+    """The one part of a one-part batch, as ``(status, header lines, body)``."""
+    head = f"{method} {target} HTTP/1.1\r\n"
+    if auth:
+        head += f"Authorization: {auth}\r\n"
+    if body is not None:
+        head += f"Content-Type: application/json\r\n\r\n{body}"
+    payload = (
+        f"--b\r\nContent-Type: application/http\r\nContent-ID: <p0>\r\n\r\n{head}\r\n--b--\r\n"
+    )
+    r = client.post(
+        uri, headers={**headers, "Content-Type": "multipart/mixed; boundary=b"}, content=payload
+    )
+    assert r.status_code == 200, r.text
+    part = r.text.split("\r\n\r\n", 1)[1].rsplit("\r\n--", 1)[0]
+    sub_head, _, sub_body = part.partition("\r\n\r\n")
+    status_line, *lines = sub_head.split("\r\n")
+    return int(status_line.split(" ")[1]), lines, sub_body
+
+
+@pytest.mark.parametrize("uri, part, status, alone, detail", _BATCH_ROWS)
+def test_google_batch_redirects_a_drive_download_and_refuses_a_sheets_read(
+    client, admin_h, tokens, uri, part, status, alone, detail
+):
+    """The rows `_BATCH_ROWS` records, each beside the same request sent on its own where the row
+    gives that request's status. A part the redirect answers carries real's three headers in real's
+    order. Neither answer looks the file up, so a spreadsheet the scoped token cannot see is
+    answered as one that does not exist is."""
+    ids = {
+        "doc": _drive_find(client, admin_h, "Brand")["id"],
+        "pdf": _drive_find(client, admin_h, "Whitepaper")["id"],
+        "sheet": _drive_find(client, admin_h, "Q1 Revenue Model")["id"],
+        "nope": "nosuchfile000",
+    }
+    method, target, body, auth = part
+    target = target.format(**ids)
+    outer = {} if auth == _ANON else admin_h
+    auth = None if auth == _ANON else auth and auth.format(mia=f"Bearer {tokens['mia@acme.com']}")
+    got, lines, sub_body = _batch_answer(client, outer, uri, method, target, body, auth)
+    assert got == status, sub_body
+    if status == 302:
+        location = f"Location: http://testserver/{detail.format(**ids)}"
+        assert lines == [
+            "Content-Length: 0",
+            "Content-Type: application/json; charset=UTF-8",
+            location,
+        ]
+        assert json.loads(sub_body) == _REDIRECTED
+    elif status == 501:
+        assert json.loads(sub_body) == detail
+    if alone is not None:
+        headers = {"Authorization": auth} if auth else outer
+        sent = client.request(method, target, headers=headers, content=body)
+        assert sent.status_code == alone, sent.text
+
+
 def test_user_cannot_fetch_others_private_gmail(client, tokens_yaml, admin_h, ro_conn):
     # a private gmail doc owned by user B, fetched with user A's token -> 404
     user_a, user_b = tokens_yaml["users"][0], tokens_yaml["users"][1]

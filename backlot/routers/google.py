@@ -16,6 +16,7 @@ import json
 import quopri
 import re
 import string
+from contextvars import ContextVar
 from email.parser import BytesParser
 from http import HTTPStatus
 from typing import NamedTuple
@@ -39,7 +40,15 @@ from backlot.pagination import decode_cursor, decode_cursor_or_none, next_page_t
 # answers an unrouted family path from its front end, as HTML, 400 on Sheets, Docs and Slides and
 # 404 on Drive and Gmail, with or without either parameter, so no JSON envelope of its own exists
 # to compare against.
-router = APIRouter(tags=["google"], dependencies=[Depends(gerr.validate_system_parameters)])
+
+
+def _system_parameters(request: Request) -> None:
+    """`gerr.validate_system_parameters`, with `callback` left alone on a Drive download inside a
+    batch, which real redirects whatever `callback` holds -- see `_drive_batch_redirect`."""
+    gerr.validate_system_parameters(request, callback=not _drive_batch_download(request))
+
+
+router = APIRouter(tags=["google"], dependencies=[Depends(_system_parameters)])
 
 
 # --- OpenAPI enrichment --------------------------------------------------
@@ -109,6 +118,11 @@ DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 _BATCH_BOUNDARY = "erb_batch_boundary_9f2a7c"
 _BATCH_DROP_HEADERS = {"host", "content-length", "content-transfer-encoding", "connection"}
 
+# The batch a sub-request came in, as the outer request's base URL and query string, or ``None``
+# for a request sent on its own. ``httpx.ASGITransport`` runs the app in the task that `batch`
+# dispatches from, so the routes a part reaches see what `batch` set.
+_BATCH_OUTER: ContextVar[tuple[str, str] | None] = ContextVar("google_batch_outer", default=None)
+
 
 def _batch_reason(code: int) -> str:
     try:
@@ -134,6 +148,19 @@ def _parse_batch_subrequest(payload: str):
     return method, target, headers, body
 
 
+def _batch_sub_response(r) -> str:
+    """One part's answer as the `application/http` payload a batch carries. The download redirect
+    (:func:`gerr.download_redirect`) carries real's three headers, measured 2026-10-04 in this
+    order: `Content-Length: 0`, though its error body follows, `Content-Type` and `Location`."""
+    lines = [f"HTTP/1.1 {r.status_code} {_batch_reason(r.status_code)}"]
+    if r.status_code == 302:
+        lines.append("Content-Length: 0")
+    lines.append(f"Content-Type: {r.headers.get('content-type', 'application/json')}")
+    if "location" in r.headers:
+        lines.append(f"Location: {r.headers['location']}")
+    return "\r\n".join(lines) + f"\r\n\r\n{r.text}"
+
+
 @router.post("/batch")
 @router.post("/batch/{api}/{version}")
 async def batch(request: Request, api: str = "", version: str = "") -> Response:
@@ -154,29 +181,31 @@ async def batch(request: Request, api: str = "", version: str = "") -> Response:
     outer_auth = request.headers.get("authorization")
     transport = httpx.ASGITransport(app=request.app, raise_app_exceptions=False)
     out_parts: list[tuple[str, str]] = []
-    async with httpx.AsyncClient(transport=transport, base_url="http://backlot.batch") as client:
-        for part in parsed.get_payload():
-            cid = part.get("Content-ID", "")
-            method, target, sub_headers, sub_body = _parse_batch_subrequest(
-                part.get_payload(decode=False)
-            )
-            if outer_auth and not any(k.lower() == "authorization" for k in sub_headers):
-                sub_headers["Authorization"] = outer_auth
-            if not method or not target:
-                sub_resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nmalformed sub-request"
-            else:
-                r = await client.request(
-                    method,
-                    target,
-                    headers=sub_headers,
-                    content=sub_body.encode() if sub_body else None,
+    outer = _BATCH_OUTER.set((str(request.base_url), request.url.query))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://backlot.batch"
+        ) as client:
+            for part in parsed.get_payload():
+                cid = part.get("Content-ID", "")
+                method, target, sub_headers, sub_body = _parse_batch_subrequest(
+                    part.get_payload(decode=False)
                 )
-                sub_resp = (
-                    f"HTTP/1.1 {r.status_code} {_batch_reason(r.status_code)}\r\n"
-                    f"Content-Type: {r.headers.get('content-type', 'application/json')}\r\n"
-                    f"\r\n{r.text}"
-                )
-            out_parts.append((cid, sub_resp))
+                if outer_auth and not any(k.lower() == "authorization" for k in sub_headers):
+                    sub_headers["Authorization"] = outer_auth
+                if not method or not target:
+                    sub_resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nmalformed sub-request"
+                else:
+                    r = await client.request(
+                        method,
+                        target,
+                        headers=sub_headers,
+                        content=sub_body.encode() if sub_body else None,
+                    )
+                    sub_resp = _batch_sub_response(r)
+                out_parts.append((cid, sub_resp))
+    finally:
+        _BATCH_OUTER.reset(outer)
 
     body = ""
     for cid, sub_resp in out_parts:
@@ -2045,13 +2074,15 @@ async def drive_files_list(request: Request):
 
 @router.get("/drive/v3/files/{file_id}", openapi_extra={"parameters": _P_DRIVE_ALT})
 async def drive_files_get(file_id: str, request: Request):
+    if _drive_batch_download(request):
+        _drive_batch_redirect(request)
     conn = auth.conn(request)
     caller = _require(request)
     download = gerr.alt_format(request.query_params) == "media"
     _drive_typed(request, "acknowledgeAbuse", "supportsAllDrives", "supportsTeamDrives")
     # Measured 2026-10-04: before the lookup, so a file that does not exist is refused alike, and
-    # before `fields`.
-    if not download and _drive_true(request, "acknowledgeAbuse"):
+    # before `fields`. Inside a batch real does not check a part's own flag.
+    if not download and _drive_true(request, "acknowledgeAbuse") and _BATCH_OUTER.get() is None:
         raise gerr.abuse_acknowledgment_not_applicable()
     ids = auth.visible_ids(request, caller)
     row = store.gdrive_by_id(conn, file_id, visible_ids=ids)
@@ -2092,6 +2123,8 @@ async def drive_files_export(file_id: str, request: Request):
     `text/markdown` and `text/html` each came back as exactly that, with no `charset`. So the
     header is set whole, where a ``media_type`` would have Starlette append `; charset=utf-8` to a
     lower-case `text/` type."""
+    if _drive_batch_download(request):
+        _drive_batch_redirect(request)
     conn = auth.conn(request)
     caller = _require(request)
     requested = gerr.first_repeat(request.query_params, "mimeType")
@@ -3253,11 +3286,19 @@ def _workbook(request: Request, spreadsheet_id: str) -> tuple:
 
     A document that STATES a grid answers with its stored sheets; one that does not answers with a
     SINGLE synthesized sheet holding ``_sheets_grid``'s line-per-cell reading. Prose is therefore
-    one more grid, which is what leaves a single serving path below and stops the three Sheets
-    calls disagreeing about a cell.
+    one more grid, which is what leaves a single serving path below and stops the five Sheets reads
+    disagreeing about a cell.
 
     A prose sheet's cells are strings and STAY strings. Nothing here sniffs a line for a number or
-    a boolean: a cell's type is something a corpus states, never something this module infers."""
+    a boolean: a cell's type is something a corpus states, never something this module infers.
+
+    Inside a batch there is no lookup: real's batch does not implement the Sheets reads. Measured
+    2026-10-04 on the five reads this module serves, the answer is 501 after the credential and the
+    typed query values and before the spreadsheet is looked up, so one that does not exist gets it
+    as well."""
+    if _BATCH_OUTER.get() is not None:
+        _require(request)  # which the two POST reads leave to the lookup below
+        raise gerr.unimplemented()
     row = _editor_doc(request, spreadsheet_id, expect="spreadsheet")
     stored = store.gdrive_sheets_for(auth.conn(request), spreadsheet_id)
     if not stored:
@@ -3847,6 +3888,70 @@ def _drive_true(request: Request, name: str) -> bool:
     not a domain administrator, which no caller here is: 404 for the file on `permissions.list` and
     400 at `q` on `drives.list`."""
     return (gerr.first_repeat(request.query_params, name) or "").casefold() == "true"
+
+
+def _drive_batch_download(request: Request) -> bool:
+    """Whether this request is a Drive download sent as a part of a batch: `files.get` with
+    `alt=media`, or `files.export` with no `alt`, an empty one or `alt=media`. Read off the route
+    the request matched, so the router's dependency can ask before the route runs."""
+    if _BATCH_OUTER.get() is None:
+        return False
+    alt = gerr.alt_format(request.query_params)
+    endpoint = request.scope.get("endpoint")
+    return (endpoint is drive_files_get and alt == "media") or (
+        endpoint is drive_files_export and alt in ("", "media")
+    )
+
+
+# A percent-escape in a query string, which real decodes in a batch redirect's `Location` when it
+# stands for an ASCII letter or digit -- see `_batch_query_pairs`.
+_QUERY_ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def _batch_query_pairs(query: str) -> list[tuple[str, str]]:
+    """A query string's pairs as real writes them into a batch redirect's `Location`. Measured
+    2026-10-04, in a name and a value alike: an empty pair is dropped, a name with no `=` gains one,
+    and an escape of an ASCII letter or digit is decoded, where any other escape keeps its byte and
+    has its hex written in upper case (`%7e` is `%7E`, `%2d` is `%2D`); `+` and `%20` stay as
+    sent."""
+
+    def normalised(text: str) -> str:
+        def one(match: "re.Match[str]") -> str:
+            char = chr(int(match.group(1), 16))
+            return char if char.isascii() and char.isalnum() else "%" + match.group(1).upper()
+
+        return _QUERY_ESCAPE.sub(one, text)
+
+    return [
+        (normalised(name), normalised(value))
+        for name, _, value in (pair.partition("=") for pair in query.split("&") if pair)
+    ]
+
+
+def _drive_batch_redirect(request: Request) -> None:
+    """A Drive download inside a batch, answered with real's redirect to its download host.
+
+    Measured 2026-10-04 on `files.get` with `alt=media` and on `files.export`: the redirect comes
+    after `$.xgafv` and after a credential the part carries, a bad one being the 401, while a part
+    with no credential at all is redirected. It comes ahead of everything else measured beside it:
+    a file that does not exist, `supportsAllDrives=NOPE`, `fields=bogus`, an absent or empty
+    `mimeType`, a Docs file read with `alt=media`, and a `callback`, which neither wraps the
+    redirect (`cb`) nor refuses it (`a b`).
+
+    `Location` is the request's path under `/download`, then the request's query pairs, then each
+    of the batch request's whose name the request's pairs do not carry, in the batch's order, all
+    as `_batch_query_pairs` writes them. A name is matched as written there, so `fo%6F=` keeps the
+    batch's `foo` out and `Foo` does not, and a name the batch repeats is carried every time."""
+    if request.headers.get("authorization"):
+        _require(request)
+    base, outer_query = _BATCH_OUTER.get()
+    pairs = _batch_query_pairs(request.url.query)
+    named = {name for name, _ in pairs}
+    pairs += [(name, value) for name, value in _batch_query_pairs(outer_query) if name not in named]
+    query = "&".join(f"{name}={value}" for name, value in pairs)
+    raise gerr.download_redirect(
+        f"{base}download{request.url.path}" + (f"?{query}" if query else "")
+    )
 
 
 # An int32 as the Drive query parser takes one. Measured on `pageSize`, on `files.list` 2026-09-23

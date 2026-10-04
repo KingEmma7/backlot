@@ -205,6 +205,25 @@ def abuse_acknowledgment_not_applicable() -> GoogleError:
     )
 
 
+def download_redirect(location: str) -> GoogleError:
+    """A Drive download inside a batch, which real sends to its download host rather than
+    answering. Measured 2026-10-04: a 302 carrying ``Location`` and this error body."""
+    exc = GoogleError(302, "Unknown Error.", reason="backendError", status="UNKNOWN")
+    exc.headers = {"Location": location}
+    return exc
+
+
+def unimplemented() -> GoogleError:
+    """A Sheets read inside a batch. Measured 2026-10-04, its `errors[]` entry, shown at
+    `$.xgafv=1`, is ``notImplemented`` under ``global``."""
+    return GoogleError(
+        501,
+        "Operation is not implemented, or supported, or enabled.",
+        reason="notImplemented",
+        status="UNIMPLEMENTED",
+    )
+
+
 def invalid_argument(message: str) -> GoogleError:
     """The editor APIs' generic 400. Its `errors[]` entry, shown at `$.xgafv=1`, is ``badRequest``
     under ``global`` — measured on an unparseable range, a range past the grid, an unsupported
@@ -540,7 +559,7 @@ def jsonp_callback(request: Request) -> str | None:
     return first_repeat(query, CALLBACK) or None
 
 
-def validate_system_parameters(request: Request) -> None:
+def validate_system_parameters(request: Request, *, callback: bool = True) -> None:
     """Refuse a `$.xgafv` other than `1` or `2`, or a `callback` that cannot be a JavaScript name,
     on a Google-family path, before the route runs.
 
@@ -550,19 +569,25 @@ def validate_system_parameters(request: Request) -> None:
     because it beats `callback` too -- measured, `callback=a b&$.xgafv=9` answers the `$.xgafv`
     sentence, wrapped through the very name the other check would have refused. The batch endpoint
     is not a family path and is left alone.
+
+    ``callback=False`` leaves `callback` alone: it is not checked, and a refusal the request meets
+    later is not wrapped through it. The caller decides when, since which requests real exempts is a
+    question about the route.
     """
     if family(request.url.path) is None:
         return
-    # That this ran at all is what :func:`rendered` needs to know, and only this call can say so:
-    # a ROUTER dependency runs once a route has matched, so an unrouted family path reaches the
+    # That the check ran is what :func:`rendered` needs to know, and only this call can say so: a
+    # ROUTER dependency runs once a route has matched, so an unrouted family path reaches the
     # renderer with a `callback` nothing has looked at.
-    request.state.google_system_parameters_checked = True
+    request.state.google_system_parameters_checked = callback
     value = xgafv(request.query_params)
     if value is not None and value not in XGAFV_VALUES:
         raise bad_system_parameter(XGAFV, value)
-    callback = jsonp_callback(request)
-    if callback is not None and not _CALLBACK_NAME.fullmatch(callback):
-        raise bad_jsonp_callback(callback)
+    if not callback:
+        return
+    name = jsonp_callback(request)
+    if name is not None and not _CALLBACK_NAME.fullmatch(name):
+        raise bad_jsonp_callback(name)
 
 
 def has_errors_array(fam: str, value: str | None) -> bool:
