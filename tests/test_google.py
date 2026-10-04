@@ -5988,16 +5988,17 @@ def test_the_answers_come_back_sorted_by_where_each_range_starts(gc, gh, book):
     ]
 
 
-# Data-filter requests measured against real Sheets on 2026-10-04, as ``(route, target, body,
-# status, shown)``: `values` is `values:batchGetByDataFilter` and `sheet` is `:getByDataFilter`; the
-# target is the probe-shaped spreadsheet `test_the_data_filter_reads_answer_every_measured_request`
-# builds, one no spreadsheet has (`nosuch`), or the probe with no credential (`anon`); the body is
-# the bytes sent, with the probe's sheet ids as `ID_SHEET1`, `ID_DATA` and `ID_R1C1`. ``shown`` is
-# the message of a refusal, `(message, reason, domain)` for one sent with `$.xgafv=1`, and of a
-# success each answer's `(range, majorDimension, echoed filter)` on `values` (``None`` for no
-# `valueRanges` at all) and each sheet's `(title, data blocks)` on `sheet`, a block's lists by their
-# length. The two `sheetId: 0` rows were sent to a spreadsheet whose one sheet has that id, as the
-# probe's first sheet has here.
+# Data-filter requests measured against real Sheets on 2026-10-04, as
+# ``(route, target, body, status, shown)``: `values` is `values:batchGetByDataFilter` and `sheet` is
+# `:getByDataFilter`; the target is the probe-shaped spreadsheet
+# `test_the_data_filter_reads_answer_every_measured_request` builds, one no spreadsheet has
+# (`nosuch`), or the probe with no credential (`anon`); the body is the bytes sent, with the probe's
+# sheet ids as `ID_SHEET1`, `ID_DATA` and `ID_R1C1`. ``shown`` is the message of a refusal,
+# `(message, reason, domain)` for one sent with `$.xgafv=1`, and of a success each answer's
+# `(range, majorDimension, echoed filters…)` on `values` (``None`` for no `valueRanges` at all) and
+# each sheet's `(title, data blocks)` on `sheet`, a block's lists by their length. The two
+# `sheetId: 0` rows were sent to a spreadsheet whose one sheet has that id, as the probe's first
+# sheet has here.
 # fmt: off
 MEASURED_BY_FILTER = [
     ('values', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_SHEET1, "startRowIndex": "abc"}}]}', 400, 'Invalid value at \'data_filters[0].grid_range.start_row_index.value\' (TYPE_INT32), "abc"'),
@@ -6491,7 +6492,35 @@ MEASURED_BY_FILTER = [
     ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}], "includeGridData": 1}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1}])]),
     ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}], "includeGridData": 1.0}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1}])]),
     ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}], "includeGridData": 0}', 200, [('Data', None)]),
+    ('values', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 2, "endRowIndex": 2}}]}', 200, [('#REF!', 'ROWS', {'gridRange': {'endRowIndex': 1, 'sheetId': 'ID_DATA', 'startRowIndex': 1}}, {'gridRange': {'endRowIndex': 2, 'sheetId': 'ID_DATA', 'startRowIndex': 2}})]),
+    ('values', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}]}', 200, [('#REF!', 'ROWS', {'gridRange': {'endRowIndex': 1, 'sheetId': 'ID_DATA', 'startRowIndex': 1}}, {'gridRange': {'endRowIndex': 1, 'sheetId': 'ID_DATA', 'startRowIndex': 1}})]),
+    ('values', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"gridRange": {"sheetId": ID_DATA, "startColumnIndex": 1, "endColumnIndex": 1}}]}', 200, [('#REF!', 'ROWS', {'gridRange': {'endRowIndex': 1, 'sheetId': 'ID_DATA', 'startRowIndex': 1}}, {'gridRange': {'endColumnIndex': 1, 'sheetId': 'ID_DATA', 'startColumnIndex': 1}})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1:A1"}, {"a1Range": "Data!A1"}]}', 200, [('Data!A1', 'ROWS', {'a1Range': 'Data!A1:A1'}, {'a1Range': 'Data!A1'})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "data!A1"}, {"a1Range": "Data!A1"}]}', 200, [('Data!A1', 'ROWS', {'a1Range': 'data!A1'}, {'a1Range': 'Data!A1'})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data"}, {"a1Range": "Data!A1:Z1000"}]}', 200, [('Data!A1:Z1000', 'ROWS', {'a1Range': 'Data'}, {'a1Range': 'Data!A1:Z1000'})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1:B2"}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 2}}]}', 200, [('Data!A1:B2', 'ROWS', {'a1Range': 'Data!A1:B2'}, {'gridRange': {'endColumnIndex': 2, 'endRowIndex': 2, 'sheetId': 'ID_DATA', 'startColumnIndex': 0, 'startRowIndex': 0}})]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1:A1"}, {"a1Range": "Data!A1"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "data!A1"}, {"a1Range": "Data!A1"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}, {"a1Range": "Data!B1"}, {"a1Range": "Data!A1"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1}, {'columnMetadata': 1, 'rowMetadata': 1, 'startColumn': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1:B2"}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 2}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 2, 'rowMetadata': 2}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 2, "endRowIndex": 2}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'startRow': 1}, {'columnMetadata': 26, 'startRow': 2}])]),
     ('values', 'probe', b'{"dataFilters": [{"developerMetadataLookup": {"metadataLocation": {"dimensionRange": {"sheetId": ID_DATA, "dimension": "ROWS", "startIndex": 2147483647, "endIndex": -2147483648}}}}]}', 400, 'Invalid dataFilter[0]: DimensionRange indexes must be >= 0'),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'startRow': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"gridRange": {"sheetId": ID_DATA, "startColumnIndex": 1, "endColumnIndex": 1}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'startRow': 1}, {'rowMetadata': 1000, 'startColumn': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data"}, {"a1Range": "Data!A1:Z1000"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'rowMetadata': 1000}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1:A2000"}, {"a1Range": "Data!A1:A1000"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1000}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 100}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 26}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'rowMetadata': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Sheet1!A1"}, {"a1Range": "Data!A1"}], "includeGridData": true}', 200, [('Sheet1', [{'columnMetadata': 1, 'rowMetadata': 1}]), ('Data', [{'columnMetadata': 1, 'rowMetadata': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!B1"}, {"a1Range": "Data!A1"}, {"a1Range": "Data!B1"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1, 'startColumn': 1}, {'columnMetadata': 1, 'rowMetadata': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"a1Range": "Data!A2"}, {"a1Range": "Data!A1"}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 1, 'rowMetadata': 1, 'startRow': 1}, {'columnMetadata': 1, 'rowMetadata': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}, {"a1Range": "Data!A1"}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'startRow': 1}, {'columnMetadata': 1, 'rowMetadata': 1}])]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1:A2000"}, {"a1Range": "Data!A1:A1000"}]}', 200, [('Data!A1:A1000', 'ROWS', {'a1Range': 'Data!A1:A2000'}, {'a1Range': 'Data!A1:A1000'})]),
+    ('values', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 100}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 26}}]}', 200, [('Data!A1:Z1', 'ROWS', {'gridRange': {'endColumnIndex': 100, 'endRowIndex': 1, 'sheetId': 'ID_DATA', 'startColumnIndex': 0, 'startRowIndex': 0}}, {'gridRange': {'endColumnIndex': 26, 'endRowIndex': 1, 'sheetId': 'ID_DATA', 'startColumnIndex': 0, 'startRowIndex': 0}})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Sheet1!A1"}, {"a1Range": "Data!A1"}]}', 200, [('Sheet1!A1', 'ROWS', {'a1Range': 'Sheet1!A1'}), ('Data!A1', 'ROWS', {'a1Range': 'Data!A1'})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!B1"}, {"a1Range": "Data!A1"}, {"a1Range": "Data!B1"}]}', 200, [('Data!A1', 'ROWS', {'a1Range': 'Data!A1'}), ('Data!B1', 'ROWS', {'a1Range': 'Data!B1'}, {'a1Range': 'Data!B1'})]),
+    ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A2"}, {"a1Range": "Data!A1"}]}', 200, [('Data!A1', 'ROWS', {'a1Range': 'Data!A1'}), ('Data!A2', 'ROWS', {'a1Range': 'Data!A2'})]),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 100}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 26, 'startRow': 1}])]),
+    ('sheet', 'probe', b'{"dataFilters": [{"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 5}}, {"gridRange": {"sheetId": ID_DATA, "startRowIndex": 1, "endRowIndex": 1}}], "includeGridData": true}', 200, [('Data', [{'columnMetadata': 5, 'startRow': 1}, {'columnMetadata': 26, 'startRow': 1}])]),
     ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}], "": "x"}', 400, 'Invalid JSON payload received. Unknown name "": Proto fields must have a name.'),
     ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}], "": {"a": 1}}', 400, 'Invalid JSON payload received. Unknown name "": Proto fields must have a name.'),
     ('values', 'probe', b'{"dataFilters": [{"a1Range": "Data!A1"}], "": [1]}', 400, 'Invalid JSON payload received. Unknown name "": Proto fields must have a name.'),
@@ -6548,7 +6577,7 @@ def _by_filter_shown(route: str, r, xgafv: bool):
         if "valueRanges" not in body:
             return None
         return [
-            (v["valueRange"]["range"], v["valueRange"]["majorDimension"], v["dataFilters"][0])
+            (v["valueRange"]["range"], v["valueRange"]["majorDimension"], *v["dataFilters"])
             for v in body["valueRanges"]
         ]
     return [

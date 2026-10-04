@@ -3595,6 +3595,16 @@ def _sheets_grid_selection(grid: dict, sheets: list[_Sheet], sheet_word: str):
     return _a1_name(sheet, r0, c0, min(r1, sheet.rows), min(c1, sheet.cols))
 
 
+def _sheets_bounds(selection, sheets: list[_Sheet]) -> tuple[_Sheet, int, int, int, int]:
+    """The sheet and half-open ``(r0, c0, r1, c1)`` a filter's A1 spec or :class:`_Empty` covers,
+    an end past the grid cut to it."""
+    if isinstance(selection, _Empty):
+        e = selection
+        return e.sheet, e.r0, e.c0, min(e.r1, e.sheet.rows), min(e.c1, e.sheet.cols)
+    sheet, part = _a1_sheet(selection, sheets)
+    return (sheet, *_a1_range(selection, part, sheet))
+
+
 def _sheets_check_lookup(lookup: dict, sheets: list[_Sheet]) -> None:
     """A `developerMetadataLookup`'s refusals. A corpus states no developer metadata, so a lookup
     that passes them matches nothing — real's answer for one on a spreadsheet carrying none,
@@ -3752,7 +3762,7 @@ async def sheets_values_batch_get_by_data_filter(spreadsheet_id: str, request: R
     """``values:batchGet`` addressed by DataFilter rather than by A1 string.
 
     A read, issued over POST because the filters do not fit in a query string. Each entry carries
-    the ``valueRange`` AND the filter that selected it — measured — so a caller that sent several
+    the ``valueRange`` AND the filters that selected it — measured — so a caller that sent several
     can tell which answer belongs to which.
 
     In the order real answers, measured 2026-10-04 with two wrong at once: the credential, then the
@@ -3778,15 +3788,10 @@ async def sheets_values_batch_get_by_data_filter(spreadsheet_id: str, request: R
     # NOT the order the filters arrived in. Measured: the answers come back sorted by where each
     # range starts, column before row — `Data!A2` precedes `Data!B1`, `Data!B9` precedes
     # `Data!B10`, a shorter range precedes the one that extends it, and a sheet earlier in the
-    # workbook comes first. Each entry still carries the filter that selected it, so a caller pairs
-    # by that rather than by position.
+    # workbook comes first. Each entry still carries the filters that selected it, so a caller
+    # pairs by those rather than by position.
     def where(i: int):
-        selection = selections[i]
-        if isinstance(selection, _Empty):
-            e = selection
-            return (e.sheet.index, e.c0, e.r0, e.c1, e.r1)
-        sheet, part = _a1_sheet(selection, sheets)
-        r0, c0, r1, c1 = _a1_range(selection, part, sheet)
+        sheet, r0, c0, r1, c1 = _sheets_bounds(selections[i], sheets)
         return (sheet.index, c0, r0, c1, r1)
 
     def answer(selection) -> dict:
@@ -3795,14 +3800,25 @@ async def sheets_values_batch_get_by_data_filter(spreadsheet_id: str, request: R
         return _sheets_value_range(selection, sheets, major, render)
 
     out: dict = {"spreadsheetId": spreadsheet_id}
-    picked = [i for i, selection in enumerate(selections) if selection is not None]
-    if picked:
+    # Filters whose answers name the same range share one entry, which lists them in the order
+    # sent, measured 2026-10-04: `Data!A1:A1` beside `Data!A1`, an `a1Range` beside the `gridRange`
+    # for its cells, two ranges equal once an end past the grid is cut, and two ranges with no
+    # cells in different places, rows or columns, both `#REF!`.
+    first: dict[str, int] = {}
+    entries: dict[str, dict] = {}
+    for i, selection in enumerate(selections):
+        if selection is None:
+            continue
+        value_range = answer(selection)
+        key = value_range["range"]
+        if key not in entries:
+            first[key] = i
+            entries[key] = {"valueRange": value_range, "dataFilters": []}
+        entries[key]["dataFilters"].append(_sheets_filter_echo(filters[i]))
+    if entries:
         # A lookup selects nothing and leaves no entry; with nothing else, there is no
         # `valueRanges` at all, measured 2026-10-04.
-        out["valueRanges"] = [
-            {"valueRange": answer(selections[i]), "dataFilters": [_sheets_filter_echo(filters[i])]}
-            for i in sorted(picked, key=where)
-        ]
+        out["valueRanges"] = [entries[k] for k in sorted(entries, key=lambda k: where(first[k]))]
     return _sheets_respond(request, out, _F_BATCH_BY_FILTER)
 
 
@@ -3812,15 +3828,27 @@ async def sheets_values_batch_get_by_data_filter(spreadsheet_id: str, request: R
 )
 async def sheets_get_by_data_filter(spreadsheet_id: str, request: Request):
     """``spreadsheets.get`` addressed by DataFilter. Same response, and the filters scope the
-    ``sheets`` array exactly as ``ranges`` does — measured, including that NO filter means every
-    sheet rather than the refusal its values-level sibling gives, and so does a list of developer
-    metadata lookups alone, which select nothing (measured 2026-10-04). The credential, the body,
-    the spreadsheet's lookup and the filters come in the order its sibling's docstring gives."""
+    ``sheets`` array as ``ranges`` does but for cells two filters cover (below) — measured,
+    including that NO filter means every sheet rather than the refusal its values-level sibling
+    gives, and so does a list of developer metadata lookups alone, which select nothing (measured
+    2026-10-04). The credential, the body, the spreadsheet's lookup and the filters come in the
+    order its sibling's docstring gives."""
     _require(request)
     body = protojson.read(await request.body(), _PJ_GET_BY_FILTER)
     row, sheets = _workbook(request, spreadsheet_id)
     selections = _sheets_selections(body.get("data_filters", []), sheets, values_level=False)
-    specs = [s for s in selections if s is not None]
+    # Filters that cover the same cells share one `data` block, placed where the first of them was
+    # sent, measured 2026-10-04 on the pairs with cells `sheets_values_batch_get_by_data_filter`
+    # lists and on one empty range sent twice. Two empty ranges in different places stay two
+    # blocks, and `spreadsheets.get` answers a `ranges` value sent twice with a block for each.
+    specs, seen = [], set()
+    for selection in selections:
+        if selection is None:
+            continue
+        sheet, *cells = _sheets_bounds(selection, sheets)
+        if (sheet.index, *cells) not in seen:
+            seen.add((sheet.index, *cells))
+            specs.append(selection)
     grid = body.get("include_grid_data", False)
     if mask := gerr.first_repeat(request.query_params, "fields"):
         grid = _gmask_wants_grid(mask)
