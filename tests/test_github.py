@@ -1289,6 +1289,87 @@ def test_github_a_stated_branch_listing_replaces_the_inferred_one(gh_client, gh_
     assert c.get(f"{base}/branches/trunk", headers=gh_admin_h).status_code == 200
 
 
+@pytest.mark.parametrize(
+    "value, selection",
+    [
+        pytest.param(None, None, id="omitted"),
+        pytest.param("", None, id="empty"),
+        pytest.param("0", False, id="zero"),
+        pytest.param("f", False, id="lower-f"),
+        pytest.param("F", False, id="upper-f"),
+        pytest.param("false", False, id="lower-false"),
+        pytest.param("FALSE", False, id="upper-false"),
+        pytest.param("off", False, id="lower-off"),
+        pytest.param("OFF", False, id="upper-off"),
+        pytest.param("1", True, id="one"),
+        pytest.param("t", True, id="lower-t"),
+        pytest.param("true", True, id="lower-true"),
+        pytest.param("TRUE", True, id="upper-true"),
+        pytest.param("yes", True, id="yes"),
+        pytest.param("banana", True, id="arbitrary"),
+        pytest.param("no", True, id="no"),
+        pytest.param("n", True, id="lower-n"),
+        pytest.param("00", True, id="double-zero"),
+        pytest.param("False", True, id="title-false"),
+        pytest.param("fAlSe", True, id="mixed-false"),
+        pytest.param("Off", True, id="title-off"),
+        pytest.param("oFF", True, id="mixed-off"),
+        pytest.param("0 ", True, id="zero-trailing-space"),
+        pytest.param(" false", True, id="false-leading-space"),
+        pytest.param("f ", True, id="f-trailing-space"),
+        pytest.param("false ", True, id="false-trailing-space"),
+        pytest.param(" off ", True, id="off-surrounded-spaces"),
+        pytest.param(" true ", True, id="true-surrounded-spaces"),
+    ],
+)
+def test_github_protected_filter_matches_measured_values(
+    gh_client, gh_admin_h, gh_org, value, selection
+):
+    """Measured on fastapi/fastapi, 2026-10-05, unauthenticated with a fresh nonce per request
+    and API version 2022-11-28: omitted/empty returned all 25 branches, the seven exact false
+    spellings returned 24 unprotected branches, and the other values returned protected master.
+    Case and whitespace are significant; the fixture makes all three selections distinct.
+    """
+    c, _ = gh_client
+    params = {} if value is None else {"protected": value}
+    response = c.get(
+        f"/github/repos/{gh_org}/stated-repo/branches", headers=gh_admin_h, params=params
+    )
+    assert response.status_code == 200, response.text
+    expected = {
+        None: [("release/2026-03", False), ("trunk", True)],
+        False: [("release/2026-03", False)],
+        True: [("trunk", True)],
+    }
+    assert [(b["name"], b["protected"]) for b in response.json()] == expected[selection]
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        pytest.param("f", [("main", False)], id="unprotected"),
+        pytest.param("False", [], id="protected"),
+    ],
+)
+def test_github_protected_filter_keeps_repository_scope(
+    gh_client, gh_user_tokens, gh_org, value, expected
+):
+    """Filtering a people-only repository preserves admin/member access and the outsider's 404,
+    including when the selected branch set is empty for an authorized caller.
+    """
+    c, _ = gh_client
+    url = f"/github/repos/{gh_org}/vault/branches"
+    for principal in ("admin", "hana@acme.com", "bob@acme.com"):
+        headers = {"Authorization": f"Bearer {gh_user_tokens[principal]}"}
+        response = c.get(url, headers=headers, params={"protected": value})
+        if principal == "bob@acme.com":
+            assert response.status_code == 404, response.text
+            assert response.json()["message"] == "Not Found"
+        else:
+            assert response.status_code == 200, response.text
+            assert [(b["name"], b["protected"]) for b in response.json()] == expected
+
+
 def test_github_stated_protection_decides_the_filter_and_the_protection_object(
     gh_client, gh_admin_h, gh_org
 ):
@@ -1311,7 +1392,13 @@ def test_github_stated_protection_decides_the_filter_and_the_protection_object(
         return [b["name"] for b in c.get(url, headers=gh_admin_h, params=params).json()]
 
     def next_url(params):
-        return _link_rels(c.get(url, headers=gh_admin_h, params=params).headers["Link"])["next"]
+        response = c.get(url, headers=gh_admin_h, params=params)
+        assert response.status_code == 200, response.text
+        links = _link_rels(response.headers["Link"])
+        assert set(links) == {"next", "last"}
+        assert links["next"] == links["last"]
+        assert links["last"].endswith("page=2")
+        return links["next"]
 
     assert names({"protected": "true"}) == ["trunk"]
     assert names({"protected": "1"}) == ["trunk"]
@@ -1373,9 +1460,15 @@ def test_github_stated_protection_decides_the_filter_and_the_protection_object(
 
     # the selection happens ahead of the page cut, and a page url spells out only a parameter the
     # caller sent, an empty value included (`list_branches` and `_echo` carry the measurements)
-    paged = c.get(url, headers=gh_admin_h, params={"protected": "false", "per_page": 1})
-    assert [b["name"] for b in paged.json()] == ["release/2026-03"]
-    assert "Link" not in paged.headers, "one unprotected branch here is a single page"
+    # `trunk` sorts second, so selecting it on page one also rules out filtering AFTER the cut.
+    for value, expected in (("f", [("release/2026-03", False)]), ("False", [("trunk", True)])):
+        params = {"protected": value, "per_page": 1}
+        paged = c.get(url, headers=gh_admin_h, params=params)
+        assert paged.status_code == 200, paged.text
+        assert [(b["name"], b["protected"]) for b in paged.json()] == expected
+        assert "Link" not in paged.headers, "the filtered listing has only one page"
+        past_last = c.get(url, headers=gh_admin_h, params={**params, "page": 2})
+        assert past_last.status_code == 200 and past_last.json() == []
     assert "protected=&" in next_url({"protected": "", "per_page": 1})
     assert "protected" not in next_url({"per_page": 1})
 
