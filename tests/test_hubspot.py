@@ -381,7 +381,12 @@ def test_hubspot_search_every_operator(client, admin_h):
     non-archived records participate — search excludes the archived view, as the real API does."""
     f = lambda **kw: _hs_filter(client, admin_h, **kw)  # noqa: E731
     assert f(propertyName="name", operator="EQ", value="Acme Health") == {"Acme Health"}
-    assert "Acme Health" not in f(propertyName="name", operator="NEQ", value="Acme Health")
+    # The negative operators include a record without the property: Stealth Health Co has no
+    # `domain`, so each of the three below finds it as well.
+    assert f(propertyName="domain", operator="NEQ", value="acme-health.com") == {
+        "Borealis Clinics",
+        "Stealth Health Co",
+    }
     assert f(propertyName="employees", operator="LT", value="200") == {"Acme Health"}
     assert f(propertyName="employees", operator="LTE", value="150") == {"Acme Health"}
     assert f(propertyName="employees", operator="GT", value="200") == {"Borealis Clinics"}
@@ -397,17 +402,56 @@ def test_hubspot_search_every_operator(client, admin_h):
     assert f(
         propertyName="lifecyclestage", operator="IN", values=["evaluation", "procurement"]
     ) == {"Acme Health", "Borealis Clinics"}
-    assert "Acme Health" not in f(
-        propertyName="lifecyclestage", operator="NOT_IN", values=["evaluation"]
-    )
+    assert f(propertyName="domain", operator="NOT_IN", values=["acme-health.com"]) == {
+        "Borealis Clinics",
+        "Stealth Health Co",
+    }
     assert f(propertyName="domain", operator="HAS_PROPERTY") == {"Acme Health", "Borealis Clinics"}
     assert f(propertyName="domain", operator="NOT_HAS_PROPERTY") == {"Stealth Health Co"}
     assert f(propertyName="name", operator="CONTAINS_TOKEN", value="Clinics") == {
         "Borealis Clinics"
     }
-    assert "Borealis Clinics" not in f(
-        propertyName="name", operator="NOT_CONTAINS_TOKEN", value="Clinics"
-    )
+    assert f(propertyName="domain", operator="NOT_CONTAINS_TOKEN", value="borealis") == {
+        "Acme Health",
+        "Stealth Health Co",
+    }
+
+
+@pytest.mark.parametrize(
+    "prop, value, want",
+    [
+        ("name", "Clin*", {"Borealis Clinics"}),
+        ("name", "*lini*", {"Borealis Clinics"}),
+        ("name", "*nics", {"Borealis Clinics"}),
+        ("name", "Clinics*", {"Borealis Clinics"}),
+        ("name", "Cl*cs", {"Borealis Clinics"}),
+        ("name", "Heal*", {"Acme Health", "Stealth Health Co"}),
+        ("name", "* Clinics", {"Borealis Clinics"}),
+        ("name", "Clin", set()),
+        ("name", "Clin*x", set()),
+        ("name", "?linics", set()),
+        # `*` alone asks only for a token, and Stealth Health Co has no `domain`
+        ("domain", "*", {"Acme Health", "Borealis Clinics"}),
+    ],
+)
+def test_hubspot_contains_token_reads_star_as_a_wildcard(client, admin_h, prop, value, want):
+    """The wildcard rule `_NEEDLE_RE`'s comment records; `NOT_CONTAINS_TOKEN` finds none of what
+    `CONTAINS_TOKEN` finds."""
+
+    def f(op):
+        return _hs_filter(client, admin_h, propertyName=prop, operator=op, value=value)
+
+    assert f("CONTAINS_TOKEN") == want
+    assert not want & f("NOT_CONTAINS_TOKEN")
+
+
+def test_hubspot_wildcard_needle_with_many_stars_stays_fast():
+    # the needle comes from the request, so many `*` against one long token must not backtrack
+    from backlot.routers import hubspot as hs
+
+    f = {"operator": "CONTAINS_TOKEN", "value": "a*a*a*a*a*a*a*a*b"}
+    assert hs._match_one("a" * 20000, f) is False
+    assert hs._match_one("a" * 20000 + "b", f) is True
 
 
 def test_hubspot_search_prefilter_cannot_change_results(client, admin_h, monkeypatch):
@@ -446,6 +490,21 @@ def test_hubspot_search_prefilter_cannot_change_results(client, admin_h, monkeyp
                 }
             ]
         },
+        # IN on `domain`, which Stealth Health Co lacks: the pushdown drops that record, so Python
+        # has to as well
+        {
+            "filterGroups": [
+                {
+                    "filters": [
+                        {
+                            "propertyName": "domain",
+                            "operator": "IN",
+                            "values": ["acme-health.com", "borealis.example"],
+                        }
+                    ]
+                }
+            ]
+        },
         # a group whose filters mix a pushable and a non-pushable operator
         {
             "filterGroups": [
@@ -470,6 +529,16 @@ def test_hubspot_search_prefilter_cannot_change_results(client, admin_h, monkeyp
                         {"propertyName": "lifecyclestage", "operator": "EQ", "value": "qualified"}
                     ]
                 },
+            ]
+        },
+        # a wildcard needle: the pieces around `*` are still substrings of what it matches
+        {
+            "filterGroups": [
+                {
+                    "filters": [
+                        {"propertyName": "name", "operator": "CONTAINS_TOKEN", "value": "*lin*"}
+                    ]
+                }
             ]
         },
         {"query": "acme"},

@@ -36,7 +36,7 @@ Ordered as the table above, by `source_type`.
 
 | Endpoint | Notes |
 |---|---|
-| `content` | |
+| `content` | `spaceKey`, `title` (the whole title, ignoring ASCII case) |
 | `content/{id}` | |
 | `content/{id}/child/comment` | |
 | `content/{id}/child/page` | |
@@ -50,8 +50,8 @@ Ordered as the table above, by `source_type`.
 — a user grant naming that user, a group or org grant naming none — for `read`/`space`, the only
 operation an ACL states.
 
-A JSON body is the bare `application/json` on every Confluence route served — the 200s, the 404s,
-the 400, 403 and 405 measured. The charset Jira names is Jira's alone.
+A JSON body is the bare `application/json` on every Confluence route served. The charset Jira names
+is Jira's alone.
 
 A `HEAD` is the `GET` with the body left off, and declares the length that body would have had on
 every 200 but `search`'s. An `OPTIONS` is a 404 in the `errors` list the 405 uses, except on
@@ -179,10 +179,10 @@ default branch only; an older snapshot stays reachable at `contents/{path}?ref=`
 | Endpoint | Notes |
 |---|---|
 | `users/{u}/messages` | `q`: free text / `from:` `to:` `subject:` `after:` `before:` `newer_than:` `older_than:` `label:` `has:attachment` |
-| `users/{u}/messages/{id}` | `format=full\|metadata\|minimal` |
+| `users/{u}/messages/{id}` | `format=full\|metadata\|minimal`, `metadataHeaders` |
 | `users/{u}/messages/{id}/attachments/{id}` | |
 | `users/{u}/threads` | `q`, as above |
-| `users/{u}/threads/{id}` | |
+| `users/{u}/threads/{id}` | `format`, `metadataHeaders`, as above |
 | `users/{u}/labels[/{id}]` | |
 | `users/{u}/profile` | |
 
@@ -206,8 +206,8 @@ One `source_type` (`google_drive`) across four prefixes.
 | `/sheets/v4/spreadsheets/{id}` | One entry per sheet, with its own `sheetId`, `index`, `title` and `gridProperties`. Structure only — cells need `includeGridData=true`, as in real Sheets. `ranges` filters the `sheets` array itself, and gives a sheet one `data` block per range that touches it |
 | `/sheets/v4/spreadsheets/{id}/values/{range}` | A1 ranges incl. `Summary!A1:B2`, `A:A`, `1:3`, `A2:B`, a bare sheet name quoted or not, an empty one before the bang (`!A1` is the first sheet), and R1C1 — absolute (`R1C1:R2C2`) and bracketed offsets from A1 (`R[1]C[1]`), echoed as the A1 equivalent, with real's reversed-range rule. Any sheet in the workbook, matched case-insensitively; an unqualified range answers from the sheet at index 0. `majorDimension`, `valueRenderOption` |
 | `/sheets/v4/spreadsheets/{id}/values:batchGet` | As above; one unparseable range fails the whole call |
-| `/sheets/v4/spreadsheets/{id}:getByDataFilter` | The same read addressed by `DataFilter` (an `a1Range` or a `gridRange`) instead of `ranges`. A read, over POST because the filters do not fit in a query string; no filter means every sheet |
-| `/sheets/v4/spreadsheets/{id}/values:batchGetByDataFilter` | Likewise for values. Each entry carries the filter that selected it, and the entries come back ordered by where each range starts rather than as sent |
+| `/sheets/v4/spreadsheets/{id}:getByDataFilter` | The same read addressed by `DataFilter` (an `a1Range`, a `gridRange` or a `developerMetadataLookup`) instead of `ranges`. A read, over POST because the filters do not fit in a query string; no filter means every sheet, and so do lookups alone, since a corpus states no developer metadata for one to match. Two filters covering the same cells get a single `data` block |
+| `/sheets/v4/spreadsheets/{id}/values:batchGetByDataFilter` | Likewise for values. Each entry carries the filters that selected it, echoed as the proto real read, filters whose answers name the same range sharing one entry, and the entries come back ordered by where each range starts rather than as sent. A `gridRange` with no cells answers `#REF!`, and a lookup no entry |
 | `/slides/v1/presentations/{id}` | |
 
 The three editor APIs serve native-doc content for editor-aware clients, read structurally instead
@@ -247,14 +247,16 @@ success body is the same under all of them. A value other than `1` or `2` is ref
 anything else is read, ahead of a bad token or an unparseable range, with real's sentence
 `Invalid query parameters. Invalid value '…' for system query parameter : $.xgafv`. Inside the
 array the entry follows the error: a typed value the proto layer refuses (an enum, a bool, an
-int32) is `reason: invalid` and carries no `domain`; an Office file read as a native document is
-`failedPrecondition` under `domain: global`; everything else is `badRequest` under the same domain;
-and a missing credential — any anonymous POST, the two Sheets data-filter reads included, and a GET
-on Gmail, Docs and Slides — is the short `Login Required.` at `location: Authorization`, which Gmail
-shows by default where the editor families show it only at `1`. Measured against the live Sheets,
-Docs and Drive APIs on 2026-09-12, against Slides and Gmail on 2026-09-14 through the errors a
-request with no Authorization header reaches, and against the Sheets data-filter POSTs on
-2026-09-22.
+int32), an unknown member in a JSON body and a JSON body that is not an object are `reason: invalid`
+and carry no `domain`; under `domain: global`, a body the JSON parser refuses in its own words is
+`parseError`, an Office file read as a native document `failedPrecondition`, a data-filter read's
+500 `backendError` and everything else `badRequest`; and a missing credential — any anonymous POST,
+the two Sheets data-filter reads included, and a GET on Gmail, Docs and Slides — is the short
+`Login Required.` at `location: Authorization`, which Gmail shows by default where the editor
+families show it only at `1`. Measured against the live Sheets, Docs and Drive APIs on 2026-09-12,
+against Slides and Gmail on 2026-09-14 through the errors a request with no Authorization header
+reaches, and against the Sheets data-filter POSTs on 2026-09-22, their bodies' refusals and 500 on
+2026-10-04.
 
 **Every Google error body is rendered the way real renders one** — two spaces deep with a trailing
 newline whatever `prettyPrint` says, `application/json; charset=UTF-8`, and the 209 characters
@@ -295,8 +297,8 @@ field violation for each, a parameter's repeats together and in query order, on 
 `majorDimension`, `valueRenderOption`, `dateTimeRenderOption`, `includeGridData` and
 `excludeTablesInBandedRanges`, Drive's `pageSize` and the booleans each served Drive method declares
 (`supportsAllDrives`, `includeItemsFromAllDrives`, `acknowledgeAbuse`, `useDomainAdminAccess` and
-the two deprecated team-drive ones) alike, and a JSON body's enums and `includeGridData` carry the
-same `details`. A typed refusal comes after the credential check and before the file or spreadsheet
+the two deprecated team-drive ones) alike, and a Sheets data-filter body's values carry the same
+`details`. A typed refusal comes after the credential check and before the file or spreadsheet
 is looked up. On Drive's `files.list`, one `pageSize` outside 1-1000 is refused with the range
 sentence (1-100 on `permissions.list` and `drives.list`), while a repeated one is read from the
 first and never range-checked; a `pageToken` it did not issue is 400 `Invalid Value`; and the
@@ -306,6 +308,13 @@ export to, the empty `mimeType=` among them, with `The requested conversion is n
 matching the format without regard to case, refuses an absent `mimeType` ahead of looking the file
 up, and serves an export under the `mimeType` exactly as sent, with no `charset`. Measured against
 the live Drive and Sheets APIs on 2026-09-23, and the export's `Content-Type` on 2026-09-30.
+
+**A Sheets read enum is taken by its name in any ASCII case, with `-` for `_`, or by the number the
+name has**, in the query string and in a data-filter body alike, and `DIMENSION_UNSPECIFIED` reads
+as `ROWS`. A data-filter body is written into the request message the way real's proto writer
+writes it: every value it cannot convert and every name the request message lacks is refused in one
+400, each named by its proto path where it has one. Measured against the live Sheets API on
+2026-10-04, and a non-ASCII letter's case on 2026-10-05.
 
 ### HubSpot — `/hubspot/crm/v3` `/hubspot/crm/v4`
 
@@ -449,7 +458,7 @@ virtual-hosted client looks for `acme-artifacts.localhost:8000` and finds nothin
 | `ListObjectVersions` | Every key as its one version, `null` and the latest, since no bucket here is versioned. `prefix`, `delimiter`, `key-marker`, `version-id-marker`, `max-keys`, `encoding-type`, paged and refused as real pages and refuses them |
 | `ListMultipartUploads` | Always the empty page, since data enters through `backlot import` and no upload is ever in progress. `prefix`, `delimiter` and `key-marker` are echoed, `max-uploads` and `encoding-type` validated and echoed, as real does |
 | `ListObjects` | The bare bucket GET, and what any `list-type` other than `2` selects. `prefix`, `delimiter`, `marker`, `max-keys`, `encoding-type`; `Marker` echoed, `NextMarker` under a delimiter, an `Owner` on every object |
-| `ListObjectsV2` | Selected by `list-type=2`. `prefix`, `delimiter`, `start-after`, `continuation-token`, `max-keys`, `encoding-type`; `KeyCount` and the continuation tokens, no `Owner` |
+| `ListObjectsV2` | Selected by `list-type=2`. `prefix`, `delimiter`, `start-after`, `continuation-token`, `max-keys`, `encoding-type`, `fetch-owner`; `KeyCount` and the continuation tokens, an `Owner` on every object only under `fetch-owner=true` |
 | `GetObject` | `Range`; `partNumber`, where part `1` is the whole object as the 206 of its range, a higher part real's 416 and a number outside 1 to 10000 or one beside a `Range` real's 400; `versionId=null`, the one version each key has, where any other `versionId` is real's 400; and checksum mode, where an answer holding the whole object carries its CRC-64/NVME and another mode is real's 400. A key in a bucket that does not exist, or that the caller cannot see, is `NoSuchBucket`, as on real |
 | `HeadObject` | |
 | `GetObjectAcl`, `GetObjectTagging`, `GetObjectAttributes` and the rest of an object's sub-resources | Each as real answers an object with no tags or annotations, written with no checksum header, in a bucket without Object Lock, byte for byte: `?acl` the owner's `FULL_CONTROL`, `?tagging` an empty `TagSet`, `?attributes` the ETag, checksum, storage class and size asked for, `?annotation` no annotations and `NoSuchAnnotation` for one named, `?legal-hold` and `?retention` real's 400 for a bucket without Object Lock, and `?torrent` real's 405 |

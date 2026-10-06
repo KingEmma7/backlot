@@ -2611,6 +2611,16 @@ async def get_blob(owner: str, repo: str, sha: str, request: Request):
     caller = _require(request)
     ids = auth.visible_ids(request, caller)
     _require_repo(conn, repo, ids)
+    # Measured on psf/requests on 2026-10-03: a seven-character prefix, an upper-case sha and
+    # `zzzz` each answered this 422 with the route's own documentation_url, where a well-formed
+    # sha naming no blob is the 404 below. Upper case is refused here though `commits/{ref}`
+    # resolves it. A repository that does not exist is the 404 above, whatever the sha (measured
+    # 2026-10-05 with `zzzz` on a missing repository and on a missing owner).
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise HTTPException(
+            status_code=422,
+            detail="The sha parameter must be exactly 40 characters and contain only [0-9a-f].",
+        )
     # every snapshot, not just HEAD: a blob sha is content-addressed, so a superseded snapshot
     # keeps its own and stays fetchable at it (see store.iter_repo_file_snapshots). Streamed, so a
     # match stops the scan rather than reading the repo's every file first.
@@ -3063,14 +3073,14 @@ def _written_bare(request: Request, name: str) -> bool:
     return last == ""
 
 
-def _truthy(v: str | None) -> bool:
+def _truthy(v: str) -> bool:
     """How :func:`list_branches` reads `?protected=`. Measured on fastapi/fastapi, 2026-10-05,
     unauthenticated with API version 2022-11-28 and a fresh nonce per request: `0`, `f`, `F`,
     `false`, `FALSE`, `off`, `OFF` select unprotected branches. `False`, `fAlSe`, `Off`, `oFF`,
     `0 `, ` false`, `f `, `false ` and ` off ` select protected branches: do not fold case or strip.
     The route leaves an absent or empty value unfiltered.
     """
-    return v is not None and v not in ("", "0", "f", "F", "false", "FALSE", "off", "OFF")
+    return v not in ("0", "f", "F", "false", "FALSE", "off", "OFF")
 
 
 def _blob_sha(content: str) -> str:
