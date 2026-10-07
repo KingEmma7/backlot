@@ -2669,12 +2669,10 @@ async def list_branches(
     both would hand a client a field real GitHub never sends here.
 
     `?protected=` selects, so it is honoured rather than ignored: a client that asked for the
-    protected branches and got an unprotected one back would read that branch as push-guarded.
-    Real has three answers — only protected branches for a true value, only unprotected ones for
-    a false value, and all of them when the parameter is omitted or empty. Measured on
-    fastapi/fastapi (2026-10-05, 25 branches, one protected): the seven exact false spellings in
-    :func:`_truthy` answer 24, `False`/`fAlSe`/`Off` and whitespace-padded values answer 1, and an
-    empty or omitted value answers 25.
+    protected branches and got an unprotected one back would read that branch as push-guarded. Real
+    has three answers — only protected branches for a true value, only unprotected ones for a false
+    value, and all of them when the parameter is omitted or empty. Which spellings real reads as
+    false is :func:`_truthy`, with the measurement.
 
     All three answers are distinct for a repo whose `subtype: "repo"` record states which branches
     are protected. For one that does not, every branch is unprotected and real's last two coincide
@@ -3074,11 +3072,12 @@ def _written_bare(request: Request, name: str) -> bool:
 
 
 def _truthy(v: str) -> bool:
-    """How :func:`list_branches` reads `?protected=`. Measured on fastapi/fastapi, 2026-10-05,
-    unauthenticated with API version 2022-11-28 and a fresh nonce per request: `0`, `f`, `F`,
-    `false`, `FALSE`, `off`, `OFF` select unprotected branches. `False`, `fAlSe`, `Off`, `oFF`,
-    `0 `, ` false`, `f `, `false ` and ` off ` select protected branches: do not fold case or strip.
-    The route leaves an absent or empty value unfiltered.
+    """How :func:`list_branches` reads `?protected=`. Measured on fastapi/fastapi (25 branches, one
+    protected), 2026-10-05, unauthenticated with API version 2022-11-28 and a fresh nonce per
+    request: `0`, `f`, `F`, `false`, `FALSE`, `off`, `OFF` select the 24 unprotected branches.
+    `False`, `fAlSe`, `Off`, `oFF`, `0 `, ` false`, `f `, `false ` and ` off ` select the protected
+    one: do not fold case or strip. An empty or omitted value answers all 25, so the route leaves it
+    unfiltered.
     """
     return v not in ("0", "f", "F", "false", "FALSE", "off", "OFF")
 

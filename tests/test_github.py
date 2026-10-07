@@ -1211,9 +1211,9 @@ def test_github_lists_the_refs_a_client_enumerates_before_it_reads(gh_client, gh
     assert body[0]["commit"]["url"] == single["commit"]["url"]
 
     # `?protected=` selects: real answers only the protected branches for a true value, only the
-    # unprotected ones for a false one, and all of them for an empty or omitted parameter
-    # (`list_branches` carries the measurement). The one branch here is unprotected, so those last
-    # two coincide and `_truthy`'s split is the whole rule.
+    # unprotected ones for a false one, and all of them for an empty or omitted parameter (`_truthy`
+    # carries the measurement). The one branch here is unprotected, so those last two coincide and
+    # `_truthy`'s split is the whole rule.
     for value, kept in (("true", 0), ("1", 0), ("yes", 0), ("false", 1), ("0", 1), ("", 1)):
         r = c.get(
             f"/github/repos/{gh_org}/codebase/branches",
